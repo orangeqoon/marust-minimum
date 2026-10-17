@@ -1,0 +1,9 @@
+{
+  "edition": "minimum",
+  "distribution": "edition",
+  "pluginCount": 23,
+  "editionDefaults": {
+    "uiLevel": "standard",
+    "devMode": false
+  }
+}
