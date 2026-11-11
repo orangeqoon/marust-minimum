@@ -105,6 +105,7 @@
       if (!response.ok) throw new Error('template');
       var markup = await response.text();
       root.innerHTML = markup;
+      if (typeof api.refreshStatus === 'function') api.refreshStatus();
     }
     for (var style of shell.styles) await asset('link', 'href', shell.base + style);
     root.hidden = false;

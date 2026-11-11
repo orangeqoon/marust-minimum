@@ -1,6 +1,6 @@
 {
   "name": "marust",
-  "version": "0.2.6",
+  "version": "0.3.1",
   "marustReleasesRepo": "orangeqoon/marust-minimum",
   "private": false,
   "description": "marust (丸スト): OBS から複数の配信サイトへ同時に配信するときの操作をまとめる Windows のアプリ",

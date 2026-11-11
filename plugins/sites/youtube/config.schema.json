@@ -4,6 +4,10 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "outputDestinationId": {
+      "type": "string", "maxLength": 128, "default": "",
+      "description": "YouTubeを送るOBS出力の配信先id。未選択では自動切替しない。"
+    },
     "streamId": {
       "type": "string",
       "maxLength": 80,

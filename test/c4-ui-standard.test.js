@@ -29,6 +29,8 @@ const KEEP = [
   'pair.js',
   'plugin-host.css',
   'plugin-host.js',
+  'popout-bridge.js',
+  'popout-preload.js',
   'popout.html',
   'preload.js',
   'core/theme.js',

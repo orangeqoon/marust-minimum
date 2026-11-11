@@ -8,9 +8,10 @@
  */
 
 const { EVENTS } = require('../host/core/events');
-const sessionsLib = require('../plugins/session/lib/sessions');
-const sessionStoreLib = require('../plugins/session/lib/store');
-const sessionPlugin = require('../plugins/session');
+// Test-only fixture: minimum intentionally does not install the session plugin.
+const sessionsLib = require('./fixtures/session/lib/sessions');
+const sessionStoreLib = require('./fixtures/session/lib/store');
+const sessionPlugin = require('./fixtures/session');
 const chatLib = require('../plugins/chat-inlet/lib/chat');
 
 function asPluginBus(bus, id) {

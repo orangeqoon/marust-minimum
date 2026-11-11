@@ -25,9 +25,10 @@ const specs = {
   },
   'destination.setMain': {
     permission: 'write',
-    description: 'OBS のメイン出力を配信先の 1 つ（obs-main）として使うかを決め、使うサイトを選ぶ。使うときは配信開始でメイン出力も出す。送信中は変えられない',
+    description: 'OBS のメイン出力の配信先登録。送信中の変更は不可。ただし未登録・サイト未指定のメインを利用者が確認した場合だけ、OBSを操作せず登録できる',
     params: {
       use: { type: 'boolean', required: true, label: 'use' },
+      confirmActive: { type: 'boolean', required: false, label: '現在のメイン出力のサイトを確認済み' },
       site: { type: 'string', required: false, max: 40, label: 'site', stringify: true }
     }
   },
@@ -68,8 +69,14 @@ function runs(S) {
     if (!rows || !store || typeof store.putDestination !== 'function') return { ok: false, error: 'unavailable' };
     const row = rows.find(function (item) { return item && item.id === MAIN_DESTINATION_ID; }) || null;
     if (params.use !== true && !row) return { ok: true, destination: { id: MAIN_DESTINATION_ID, site: '', enabled: false } };
-    if (mainSending(row)) return { ok: false, error: 'streaming' };
     const site = params.site != null ? String(params.site) : (row && row.site != null ? String(row.site) : '');
+    // Initial identification is metadata only: never stop/start or rewrite OBS.
+    // Existing site assignments, disabling, and shared main mappings stay blocked.
+    const identifyActive = params.confirmActive === true && params.use === true && site.trim() !== ''
+      && (!row || !String(row.site || '').trim())
+      && !rows.some(item => item && item.id !== MAIN_DESTINATION_ID && item.engine
+        && item.engine.id === 'obs-local' && item.engine.targetId === MAIN_TARGET_ID);
+    if (mainSending(row) && !identifyActive) return { ok: false, error: 'streaming' };
     if (params.use === true) {
       // エンジンの結び（どのエンジンかはエンジンが知っている）。まだ無効のまま作り、下で有効にする
       const impl = engine();

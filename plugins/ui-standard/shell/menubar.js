@@ -7,10 +7,10 @@
  * パネルを開く・閉じる・並びを保存する操作を、1 か所に集めるのが役目。値（秘密）は扱わない。
  */
 
-// 3 つ目の { dev: true } は開発者モードだけ。{ min: 'advanced' } は表示の細かさが上級のときだけ（無ければ中級から。初級ではツールのメニュー自体を出さない）。
+// 3 つ目の { dev: true } は開発者モードだけ。{ min: 'advanced' } は表示の細かさが上級のときだけ（無ければ中級から。初級では一括読み込みだけ）。
 var TOOL_PANELS = [
   ['features', STR.featuresMenu],
-  ['plugin-manager', STR.pluginManagerMenu, { min: 'advanced' }],
+  ['plugin-manager', STR.pluginManagerMenuLabel, { min: 'advanced' }],
   ['obs-connect', STR.uiMenubar4],
   ['site-add', STR.uiMenubar5],
   ['sites', STR.uiState8],
@@ -78,27 +78,30 @@ function panelMenuRows(where) {
   }).sort(function (a, b) { return (a.menu.order - b.menu.order) || (a.id < b.id ? -1 : 1); });
 }
 
-// カテゴリごとに 1 つのウィンドウ（タブのまとまり）にする。
-function categoryRows() {
-  var rows = [
-    { key: 'home', title: STR.uiMenubar30, ids: ['home'], desc: STR.uiMenubar31 },
-    { key: 'obs', title: STR.uiMenubar32, ids: ['destinations'], desc: STR.uiMenubar33 }
-  ];
-  var named = panelMenuRows('view');
-  var taken = {};
-  named.forEach(function (row) { taken[row.id] = true; });
-  named.filter(function (row) { return row.menu.order < 500; }).forEach(function (row) {
-    rows.push({ key: row.menu.key, title: row.menu.title, ids: [row.id], desc: row.menu.desc });
+function toolCategoryRows() {
+  if (uiLevel === 'basic') return [];
+  var rows = [];
+  var named = panelMenuRows('tools').filter(function (row) {
+    // 中級のツールは配信操作に絞る。AI接続と経過時間は専用タブから開かない。
+    return !(uiLevel === 'standard' && row && (row.pluginId === 'ai-connect' || row.pluginId === 'session' || row.id === 'ai-connect' || row.id === 'session'));
   });
-  // サイト別の状態の表にまとめたので、サイトごとのパネル（site-*, sink-*, chat-*）はここには並べない。
+  var taken = {};
+  named.forEach(function (row) {
+    taken[row.id] = true;
+    rows.push({ key: row.menu.key, title: row.menu.title, ids: [row.id], desc: row.menu.desc, kind: 'panel' });
+  });
+  // 名乗りのない開発用パネルは、上級のツール内でだけ、従来のまとまりに入れる。
   var extras = pluginPanelRows().filter(function (row) {
-    if (taken[row.id]) return false; // 名乗りのある行で出しているもの
-    return !/^plugin:(site|sink|chat)-/.test(String(row.id || '')) && !(row.menu && row.menu.in !== 'view');
+    if (taken[row.id] || row.menu) return false;
+    if (uiLevel === 'standard' && (row.pluginId === 'ai-connect' || row.pluginId === 'session' || row.id === 'ai-connect' || row.id === 'session')) return false;
+    if (/^plugin:(site|sink|chat)-/.test(String(row.id || ''))) return false;
+    if (uiLevel === 'advanced' && row.pluginId === 'notify-discord') return false;
+    return true;
   }).sort(function (a, b) {
     return String(a.title || a.id).localeCompare(String(b.title || b.id), 'ja');
   });
   var buckets = [
-    ['watch', STR.uiMenubar38, function (t) { return /(の枠|の睡眠)$/.test(t) || /^(同接|回線|配信監視|Discord|Google|Twitch レイド)/.test(t); }, STR.uiMenubar39],
+    ['watch', STR.uiMenubar38, function (t) { return /(の枠|の睡眠)$/.test(t) || /^(同接|回線|配信監視|Discord|Google|Twitch レイド|配信の経過時間)/.test(t); }, STR.uiMenubar39],
     ['other', STR.uiMenubar40, function () { return true; }, STR.uiMenubar41]
   ];
   var placed = {};
@@ -106,9 +109,35 @@ function categoryRows() {
     var ids = extras.filter(function (row) {
       return !placed[row.id] && bucket[2](String(row.title || row.id));
     }).map(function (row) { placed[row.id] = true; return row.id; });
-    // 開発中機能は開発者モードのときだけ見せる（R1）。
-    if (bucket[0] === 'watch' && !devMode) return;
-    if (ids.length) rows.push({ key: bucket[0], title: bucket[1], ids: ids, desc: bucket[3] || '' });
+    // 開発中機能は上級・開発者モードのときだけ見せる。その他の機能は上級だけ。
+    if (bucket[0] === 'watch' && (!devMode || uiLevel !== 'advanced')) return;
+    if (bucket[0] === 'other' && uiLevel !== 'advanced') return;
+    if (ids.length) rows.push({ key: bucket[0], title: bucket[1], ids: ids, desc: bucket[3] || '', kind: 'group' });
+  });
+  return rows.filter(function (row) { return row.ids.every(knownPanel); });
+}
+
+// カテゴリごとに 1 つのウィンドウ（タブのまとまり）にする。
+function categoryRows(where) {
+  if (where === 'tools') return toolCategoryRows();
+  var homeIds = ['home'];
+  var rows = [
+    { key: 'home', title: STR.uiMenubar30, ids: ['home'], desc: STR.uiMenubar31 },
+    { key: 'obs', title: STR.uiMenubar32, ids: ['destinations'], desc: STR.uiMenubar33 }
+  ];
+  rows[0].ids = homeIds;
+  if (uiLevel === 'basic') return rows.slice(0, 1).filter(function (row) { return row.ids.every(knownPanel); });
+  var named = panelMenuRows('view').filter(function (row) {
+    // 回線の見張りは中級の「表示」メニューからだけ外す。上級では残す。
+    if (uiLevel === 'standard' && row.menu && row.menu.key === 'signal') return false;
+    // standardでは上級の開発用メニュー（回線の見張り等）を開発者モードでも表示しない。
+    if (uiLevel === 'standard' && row.menu && ['signal', 'timer'].indexOf(row.menu.key) !== -1) return false;
+    return true;
+  });
+  var taken = {};
+  named.forEach(function (row) { taken[row.id] = true; });
+  named.filter(function (row) { return row.menu.order < 500; }).forEach(function (row) {
+    rows.push({ key: row.menu.key, title: row.menu.title, ids: [row.id], desc: row.menu.desc });
   });
   named.filter(function (row) { return row.menu.order >= 500; }).forEach(function (row) {
     rows.push({ key: row.menu.key, title: row.menu.title, ids: [row.id], desc: row.menu.desc });
@@ -224,6 +253,13 @@ function refreshLayouts(selectName) {
   });
 }
 
+// Dockview 8.x serializes popoutGroups (tabs, active tab, position and size)
+// inside toJSON(). Keep one snapshot builder so named and level layouts use
+// the same format and old version-1 layouts remain readable by applyLayout.
+function currentLayoutData() {
+  return { version: 2, dockview: dockApi.toJSON() };
+}
+
 function saveLayoutAs() {
   if (!can.write) return;
   var suggestion = layoutState.current === STR.uiMenubar29 ? '' : layoutState.current;
@@ -231,6 +267,9 @@ function saveLayoutAs() {
   if (typed == null) return;
   var name = String(typed).trim();
   if (!name) return;
+  function failSave() {
+    if (typeof window.alert === 'function') window.alert(STR.layoutSaveFailed);
+  }
   call('layout.list').then(function (res) {
     var names = res && Array.isArray(res.names) ? res.names : [];
     var clash = '';
@@ -238,11 +277,15 @@ function saveLayoutAs() {
       if (String(names[i]).toLowerCase() === name.toLowerCase() && names[i] !== name) clash = names[i];
     }
     if (clash && !window.confirm('「' + name + STR.uiMenubar47 + clash + STR.uiMenubar48)) return null;
-    return call('layout.save', { name: name, data: { version: 1, dockview: dockApi.toJSON() } });
+    return call('layout.save', { name: name, data: currentLayoutData() });
   }).then(function (saved) {
     if (!saved) return null;
+    if (!saved || saved.ok !== true) {
+      failSave();
+      return null;
+    }
     return refreshLayouts(name);
-  }).catch(function () { /* 保存に失敗しても画面は今のまま */ });
+  }).catch(function () { failSave(); });
 }
 
 function loadLayout(name) {
@@ -259,6 +302,23 @@ function resetLayout() {
     applyLayout(res && res.ok ? res.data : null);
     return refreshLayouts(res && res.name ? res.name : STR.uiMenubar29);
   }).catch(function () { applyLayout(null); });
+}
+
+var menuReloadBusy = false;
+function reloadPluginsFromMenu() {
+  if (!can.write || menuReloadBusy) return;
+  menuReloadBusy = true;
+  call('plugins.reloadAll', {}).then(function (res) {
+    if (!res || res.ok !== true) {
+      window.alert(STR.pluginManagerFailed);
+      return;
+    }
+    var rows = Array.isArray(res.results) ? res.results : [];
+    var skipped = rows.filter(function (row) { return row && row.result === 'skip'; }).length;
+    var failed = rows.filter(function (row) { return row && row.result === 'error'; }).length;
+    window.alert(STR.pluginManagerReloadDone(rows.length - skipped, skipped, failed));
+    if (typeof refreshPluginCatalog === 'function') refreshPluginCatalog();
+  }).catch(function () { window.alert(STR.pluginManagerFailed); }).then(function () { menuReloadBusy = false; });
 }
 
 var levelMenuRefreshed = false;
@@ -307,16 +367,16 @@ function fillMenu(kind, pop) {
     }
   } else if (kind === 'view') {
     add(menuLabel(STR.uiMenubar57));
-    categoryRows().forEach(function (cat) {
+    categoryRows('view').forEach(function (cat) {
       var openCount = cat.ids.filter(function (id) { return !!dockApi.getPanel(id); }).length;
       var hint = openCount ? (openCount + '/' + cat.ids.length) : String(cat.ids.length);
       add(menuItem(cat.title, { role: 'menuitemcheckbox', title: cat.desc, tick: openCount === cat.ids.length, hint: hint, run: function () { toggleCategory(cat); } }));
     });
     add(menuSep());
     add(menuLabel(STR.uiMenubar58));
-    categoryRows().forEach(function (cat) {
+    categoryRows('view').forEach(function (cat) {
       if (cat.ids.length < 2) {
-        cat.ids.forEach(function (id) {
+        cat.ids.filter(function (id) { return id !== 'home'; }).forEach(function (id) {
           add(menuItem(titleOf(id), { role: 'menuitemcheckbox', title: describePanel(titleOf(id)), tick: !!dockApi.getPanel(id), run: function () { togglePanel(id); } }));
         });
       }
@@ -351,11 +411,24 @@ function fillMenu(kind, pop) {
     } }));
     add(menuItem(STR.uiMenubar62, { run: resetLayout }));
   } else if (kind === 'tools') {
+    add(menuItem(STR.pluginManagerReloadMenu, { disabled: !can.write || menuReloadBusy, run: reloadPluginsFromMenu }));
     toolRowsForLevel().forEach(function (row) {
       add(menuItem(row[1], { run: function () { openPanel(row[0]); } }));
     });
+    var toolCategories = categoryRows('tools');
+    if (toolCategories.length) add(menuSep());
+    toolCategories.forEach(function (cat) {
+      if (cat.kind === 'panel') {
+        add(menuItem(cat.title, { title: cat.desc, run: function () { openPanel(cat.ids[0]); } }));
+        return;
+      }
+      var openCount = cat.ids.filter(function (id) { return !!dockApi.getPanel(id); }).length;
+      var hint = openCount ? (openCount + '/' + cat.ids.length) : String(cat.ids.length);
+      add(menuItem(cat.title, { role: 'menuitemcheckbox', title: cat.desc, tick: openCount === cat.ids.length, hint: hint, run: function () { toggleCategory(cat); } }));
+    });
     // プラグインの ui.menu（V7）。呼べるのはそのプラグイン自身の操作と、自分のパネルを開くことだけ。
-    var pluginMenu = pluginHost && typeof pluginHost.listMenu === 'function' ? pluginHost.listMenu() : [];
+    var pluginMenu = pluginHost && typeof pluginHost.listMenu === 'function' ? pluginHost.listMenu().filter(function (item) { return item.where !== 'help'; }) : [];
+    if (uiLevel === 'advanced') pluginMenu = pluginMenu.filter(function (item) { return item.pluginId !== 'ai-connect'; });
     if (pluginMenu.length) add(menuSep());
     pluginMenu.forEach(function (item) {
       add(menuItem(item.label, { disabled: !!item.method && !can.write, run: function () { pluginHost.runMenu(item); } }));
@@ -373,6 +446,13 @@ function fillMenu(kind, pop) {
       call('tips.reset', {}).then(function (r) { window.alert(r && r.ok === true ? STR.tipsResetDone : STR.loginErr('failed')); }).catch(function () { window.alert(STR.loginErr('failed')); });
     } }));
     add(menuItem(STR.updateMenu, { disabled: !can.write, title: STR.updateMenuTitle, run: checkUpdate }));
+    var developerMenu = pluginHost && typeof pluginHost.listMenu === 'function' ? pluginHost.listMenu().filter(function (item) { return item.where === 'help'; }) : [];
+    if (developerMenu.length) {
+      add(menuSep());
+      developerMenu.forEach(function (item) {
+        add(menuItem(item.label, { disabled: !!item.method && !can.write, run: function () { pluginHost.runMenu(item); } }));
+      });
+    }
     add(menuSep());
     add(menuItem(STR.uiMenubar66, {
       role: 'menuitemcheckbox',
@@ -399,11 +479,55 @@ function checkUpdate() {
 
 // 表示の細かさの切り替え。離れる側の配置を先に保存し（初級は配置固定なので保存しない）、切り替えたあとの最初の読み込みで、そのレベルの保存があれば使う。
 var LEVEL_SWITCH_KEY = 'marust.levelSwitch';
-function saveLeavingLayout() {
-  if (uiLevel === 'basic' || !dockApi) return Promise.resolve();
+// レベルの配置を残す（再起動・レベル切替用）。初級は固定なので書かない。
+// 並べ替えのたびに debounce で書いておき、閉じるときはすぐもう一度書く（非同期の遅延に頼らない）。
+var persistLevelTimer = null;
+function persistLevelLayout() {
+  if (uiLevel === 'basic' || !dockApi || suppressRestore) return Promise.resolve();
   var data;
-  try { data = { version: 1, dockview: dockApi.toJSON() }; } catch (_) { return Promise.resolve(); }
-  return call('layout.saveLevel', { level: uiLevel, data: data }).catch(function () { /* 保存できなくても切り替える */ });
+  try { data = currentLayoutData(); } catch (_) { return Promise.resolve(); }
+  return call('layout.saveLevel', { level: uiLevel, data: data }).catch(function () { /* 自動保存の失敗は黙って次に任せる */ });
+}
+function schedulePersistLevelLayout() {
+  if (uiLevel === 'basic' || !dockApi) return;
+  if (persistLevelTimer) clearTimeout(persistLevelTimer);
+  persistLevelTimer = setTimeout(function () {
+    persistLevelTimer = null;
+    persistLevelLayout();
+  }, 400);
+}
+function flushPersistLevelLayout() {
+  if (persistLevelTimer) {
+    clearTimeout(persistLevelTimer);
+    persistLevelTimer = null;
+  }
+  return persistLevelLayout();
+}
+function saveLeavingLayout() {
+  return flushPersistLevelLayout();
+}
+function watchLevelLayoutPersist() {
+  if (watchLevelLayoutPersist.done) return;
+  watchLevelLayoutPersist.done = true;
+  if (dockApi && typeof dockApi.onDidLayoutChange === 'function') {
+    dockApi.onDidLayoutChange(function () {
+      if (suppressRestore) return;
+      schedulePersistLevelLayout();
+    });
+  }
+  // Popout position and size changes do not necessarily emit a generic
+  // layout-change event. Listen to Dockview's dedicated events so a moved or
+  // resized plugin window is captured before restart/reload.
+  ['onDidPopoutGroupPositionChange', 'onDidPopoutGroupSizeChange', 'onDidAddPopoutGroup', 'onDidRemovePopoutGroup'].forEach(function (name) {
+    if (dockApi && typeof dockApi[name] === 'function') {
+      dockApi[name](function () {
+        if (suppressRestore) return;
+        schedulePersistLevelLayout();
+      });
+    }
+  });
+  window.addEventListener('pagehide', flushPersistLevelLayout);
+  window.addEventListener('beforeunload', flushPersistLevelLayout);
 }
 function setUiLevel(level) {
   if (level === uiLevel) return;
@@ -515,6 +639,7 @@ function buildGcalSection(host) {
   var box1 = document.createElement('input');
   box1.type = 'checkbox';
   box1.id = 'gcal-link';
+  box1.disabled = true;
   box1.setAttribute('data-need', 'write');
   row.appendChild(box1);
   row.appendChild(document.createTextNode(STR.uiMenubar74));
@@ -527,68 +652,65 @@ function buildGcalSection(host) {
   box.appendChild(state);
   host.appendChild(box);
 
-  // 接続（Google にログインして、丸ストにカレンダーへ書く許可を渡す）
+  // 接続状態・ログイン／結び直し（鍵の入力は金庫パネル。取り違え防止）
   var link = document.createElement('div');
   link.className = 'gcal-login';
   var linkState = document.createElement('p');
   linkState.className = 'timer-hint';
   linkState.setAttribute('aria-live', 'polite');
+  var vaultLink = document.createElement('a');
+  vaultLink.href = '#';
+  vaultLink.textContent = STR.gcalVaultLink;
+  vaultLink.addEventListener('click', function (ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    if (typeof openPanel === 'function') openPanel('secrets');
+  });
+  var vaultP = document.createElement('p');
+  vaultP.className = 'timer-hint';
+  vaultP.appendChild(vaultLink);
   var guide = document.createElement('a');
   guide.setAttribute('href', STR.gcalGuidePath);
   guide.setAttribute('target', '_blank');
   guide.setAttribute('rel', 'noopener noreferrer');
   guide.textContent = STR.gcalGuideLink;
-  var form = document.createElement('div');
-  form.className = 'timer-setup';
-  function gfield(label, type) {
-    var l = document.createElement('label');
-    l.appendChild(document.createTextNode(label + ' '));
-    var input = document.createElement('input');
-    input.type = type;
-    input.setAttribute('autocomplete', type === 'password' ? 'new-password' : 'off');
-    input.setAttribute('spellcheck', 'false');
-    input.maxLength = 2000;
-    if (type === 'password') input.placeholder = STR.secretTailUnset;
-    l.appendChild(input);
-    form.appendChild(l);
-    form.appendChild(document.createTextNode(' '));
-    return input;
-  }
-  var idEl = gfield(STR.sitesClientId, 'text');
-  var secEl = gfield(STR.sitesClientSecret, 'password');
   var loginBtn = document.createElement('button');
   loginBtn.type = 'button';
   loginBtn.className = 'timer-btn primary';
-  var rekeyBtn = document.createElement('button');
-  rekeyBtn.type = 'button';
-  rekeyBtn.className = 'timer-btn';
-  rekeyBtn.textContent = STR.loginRekey;
   var linking = false;
   var haveKeys = false;
-  var showForm = false;
+  var loginAvailability = 'unknown';
+  var statusAvailability = 'unknown';
   link.appendChild(linkState);
-  link.appendChild(form);
   link.appendChild(loginBtn);
   link.appendChild(document.createTextNode(' '));
-  link.appendChild(rekeyBtn);
   var guideP = document.createElement('p');
   guideP.className = 'timer-hint';
   guideP.appendChild(guide);
-  // カレンダーのプラグイン（gcal）が読まれていない（calendar.loginStatus が unknown-method）ときは、この行だけにする
-  function paintNoPlugin() {
-    linkState.textContent = STR.gcalNoPlugin;
-    form.style.display = 'none';
-    loginBtn.style.display = 'none';
-    rekeyBtn.style.display = 'none';
-    guideP.style.display = 'none';
-  }
-  function showLinkParts() {
-    loginBtn.style.display = '';
-    guideP.style.display = '';
-  }
+  link.appendChild(vaultP);
   link.appendChild(guideP);
   box.appendChild(link);
 
+  function paintNoPlugin() {
+    loginAvailability = 'missing';
+    linkState.textContent = STR.gcalNoPlugin;
+    loginBtn.style.display = 'none';
+    vaultP.style.display = 'none';
+    guideP.style.display = 'none';
+    box1.checked = false;
+    box1.disabled = true;
+    state.textContent = linkState.textContent;
+  }
+  function showLinkParts() {
+    loginBtn.style.display = '';
+    vaultP.style.display = '';
+    guideP.style.display = '';
+  }
+  function isMissingResponse(res) {
+    return !!(res && res.ok === false && (res.error === 'unknown-method' || res.error === 'unknown-id'));
+  }
+  function isKnownLoginState(value) {
+    return value === 'none' || value === 'keys-only' || value === 'logged-in' || value === 'expired';
+  }
   function runLogin() {
     linking = true;
     loginBtn.disabled = true;
@@ -601,56 +723,114 @@ function buildGcalSection(host) {
   }
   loginBtn.addEventListener('click', function () {
     if (!can.write || linking) return;
-    if (showForm || !haveKeys) {
-      var body = { site: 'google', clientId: idEl.value, clientSecret: secEl.value };
-      secEl.value = '';
-      linking = true;
-      loginBtn.disabled = true;
-      call('sites.setOAuthApp', body).then(function (res) {
-        linking = false;
-        if (!res || res.ok === false) { linkState.textContent = STR.loginErr(res && res.error); paintLink(); return; }
-        idEl.value = '';
-        showForm = false;
-        return runLogin();
-      }).catch(function () { linking = false; linkState.textContent = STR.loginErr('failed'); paintLink(); });
+    if (!haveKeys) {
+      if (typeof openPanel === 'function') openPanel('secrets');
+      linkState.textContent = STR.gcalNeedVaultKeys;
       return;
     }
     if (!window.confirm(STR.gcalLinkConfirm)) return;
     runLogin();
   });
-  rekeyBtn.addEventListener('click', function () { showForm = true; paintLink(); });
-
-  function paintLink() {
-    return call('calendar.loginStatus', {}).then(function (st) {
-      if (st && st.ok === false && st.error === 'unknown-method') { paintNoPlugin(); return; }
-      showLinkParts();
-      var s = st && st.ok !== false ? st.state : 'none';
-      haveKeys = s !== 'none';
-      if (!linking) linkState.textContent = STR.gcalLoginState(s);
-      form.style.display = (!haveKeys || showForm) ? '' : 'none';
-      rekeyBtn.style.display = haveKeys && !showForm ? '' : 'none';
-      loginBtn.textContent = !haveKeys || showForm ? STR.gcalSaveAndLogin : (s === 'logged-in' ? STR.loginRelink : STR.gcalLogin);
-      loginBtn.disabled = !can.write || linking;
-      rekeyBtn.disabled = !can.write;
-    }).catch(function () { linkState.textContent = STR.gcalLoginUnknown; loginBtn.disabled = true; });
+  function paintLoginUnavailable() {
+    if (statusAvailability === 'missing') { paintNoPlugin(); return; }
+    linkState.textContent = STR.gcalLoginUnknown;
+    loginBtn.style.display = '';
+    loginBtn.disabled = true;
+    vaultP.style.display = '';
+    guideP.style.display = '';
   }
-
-  function paint() {
-    paintLink();
+  function paintStatusUnavailable() {
+    if (loginAvailability === 'missing') { paintNoPlugin(); return; }
+    box1.checked = false;
+    box1.disabled = true;
+    state.textContent = STR.uiMenubar81;
+  }
+  function readLoginStatus() {
+    return call('calendar.loginStatus', {}).then(function (st) {
+      return { value: st };
+    }, function () {
+      return { error: 'failed' };
+    });
+  }
+  function applyLoginStatus(result) {
+    var st = result && result.value;
+    if (result && result.error) {
+      loginAvailability = 'unavailable';
+      paintLoginUnavailable();
+      return;
+    }
+    if (st && st.ok === false && st.error === 'unknown-method') { paintNoPlugin(); return; }
+    if (isMissingResponse(st)) {
+      loginAvailability = 'missing';
+      paintNoPlugin();
+      return;
+    }
+    if (!st || st.ok !== true || !isKnownLoginState(st.state)) {
+      loginAvailability = 'unavailable';
+      paintLoginUnavailable();
+      return;
+    }
+    loginAvailability = 'available';
+    if (statusAvailability === 'missing') { paintNoPlugin(); return; }
+    showLinkParts();
+    var s = st.state;
+    haveKeys = s !== 'none';
+    if (!linking) linkState.textContent = STR.gcalLoginState(s);
+    loginBtn.textContent = !haveKeys ? STR.gcalOpenVault : (s === 'logged-in' ? STR.loginRelink : STR.gcalLogin);
+    loginBtn.disabled = !can.write || linking;
+  }
+  function paintLink() {
+    return readLoginStatus().then(applyLoginStatus);
+  }
+  function readStatus() {
     return call('plugin.gcal.getStatus', {}).then(function (st) {
-      var mode = st && st.mode ? st.mode : 'legacy';
-      box1.checked = mode === 'live';
-      box1.disabled = !can.write;
-      var parts = [mode === 'live' ? STR.uiMenubar75 : (mode === 'shadow' ? STR.uiMenubar76 : STR.uiMenubar77)];
-      if (st && typeof st.queue === 'number' && st.queue > 0) parts.push(STR.uiMenubar78 + st.queue + STR.uiMenubar79);
-      if (st && st.lastError) parts.push(STR.uiMenubar80 + st.lastError);
-      state.textContent = parts.join(' / ');
-    }).catch(function () {
-      state.textContent = STR.uiMenubar81;
-      box1.disabled = true;
+      return { value: st };
+    }, function () {
+      return { error: 'failed' };
+    });
+  }
+  function applyStatus(result) {
+    var st = result && result.value;
+    if (result && result.error) {
+      statusAvailability = 'unavailable';
+      paintStatusUnavailable();
+      return;
+    }
+    if (isMissingResponse(st)) {
+      statusAvailability = 'missing';
+      paintNoPlugin();
+      return;
+    }
+    if (!st || st.ok !== true) {
+      statusAvailability = 'unavailable';
+      paintStatusUnavailable();
+      return;
+    }
+    var mode = st.mode === 'off' ? 'legacy' : st.mode;
+    if (mode !== 'legacy' && mode !== 'shadow' && mode !== 'live') {
+      statusAvailability = 'unavailable';
+      paintStatusUnavailable();
+      return;
+    }
+    statusAvailability = 'available';
+    if (loginAvailability === 'missing') { paintNoPlugin(); return; }
+    box1.checked = mode === 'live';
+    box1.disabled = !can.write;
+    var parts = [mode === 'live' ? STR.uiMenubar75 : (mode === 'shadow' ? STR.uiMenubar76 : STR.uiMenubar77)];
+    if (typeof st.queueCount === 'number' && st.queueCount > 0) parts.push(STR.uiMenubar78 + st.queueCount + STR.uiMenubar79);
+    if (st && st.lastError) parts.push(st.errorHint || (STR.uiMenubar80 + st.lastError));
+    state.textContent = parts.join(' / ');
+  }
+  function paint() {
+    return Promise.all([readLoginStatus(), readStatus()]).then(function (results) {
+      loginAvailability = 'unknown';
+      statusAvailability = 'unknown';
+      applyLoginStatus(results[0]);
+      applyStatus(results[1]);
     });
   }
   box1.addEventListener('change', function () {
+    if (box1.disabled || !can.write) return;
     var want = box1.checked ? 'live' : 'legacy';
     if (want === 'live' && !window.confirm(STR.uiMenubar82)) { box1.checked = false; return; }
     box1.disabled = true;
@@ -661,7 +841,7 @@ function buildGcalSection(host) {
     }).then(paint);
   });
   paint();
-  setInterval(function () { if (host.offsetParent) paint(); }, 10000);
+  setInterval(function () { if (host.offsetParent) paint(); }, 15000);
 }
 
 var GUIDE_KEY = 'marust.timer.guideClosed';

@@ -4,12 +4,14 @@
  * Picarto の題名更新（stream.site@1）。
  * POST https://api.picarto.tv/api/v1/user/title 。秘密は picarto.config の token。
  * ファイル（わんコメの設定を含む）は読まない。リダイレクトは追わない。
+ * 認証切れは HTTP 403 以外（例: 500 + Unauthenticated）でも unauthorized にする。
  */
 
 
 const SECRET = 'picarto.config';
 const ORIGIN = 'https://api.picarto.tv';
 const PATH = '/api/v1/user/title';
+const USER_PATH = '/api/v1/user';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
 const MAX_SECRET = 262144;
 
@@ -76,6 +78,23 @@ function createSitePicarto(deps) {
     const token = typeof data.token === 'string' ? data.token.trim() : '';
     if (!token || token.indexOf('ここに') !== -1 || token.length > 2000 || /[\r\n\u0000]/.test(token)) return null;
     return { token: token };
+  }
+
+  function tokenMeta(token) {
+    const len = typeof token === 'string' ? token.length : 0;
+    let kind = 'opaque';
+    if (len < 40) kind = 'short';
+    else if ((String(token).match(/\./g) || []).length >= 2) kind = 'jwt';
+    return { tokenLen: len, tokenKind: kind };
+  }
+
+  // Picarto は認証失敗を 403 以外（500 + 本文 Unauthenticated）で返すことがある
+  function authClass(status, text) {
+    const body = typeof text === 'string' ? text : '';
+    if (status === 401 || status === 403) return 'unauthenticated';
+    if (/unauthenticated/i.test(body)) return 'unauthenticated';
+    if (status >= 200 && status < 300) return 'ok';
+    return 'other';
   }
 
   async function readConfig() {
@@ -160,17 +179,18 @@ function createSitePicarto(deps) {
     });
     if (res.error) {
       note(false);
-      say('warn', 'failed ' + res.error);
+      say('warn', 'failed ' + res.error + (res.status ? ' status=' + res.status : ''));
       return fail(res.error);
     }
-    if (res.status === 401 || res.status === 403) {
+    const kind = authClass(res.status, res.text);
+    if (kind === 'unauthenticated') {
       note(false);
-      say('warn', 'failed unauthorized');
+      say('warn', 'failed unauthorized status=' + res.status);
       return fail('unauthorized'); // L9b: ログイン切れ
     }
     if (res.status < 200 || res.status >= 300) {
       note(false);
-      say('warn', 'failed http');
+      say('warn', 'failed http status=' + res.status);
       return fail('http');
     }
     seenTitle = title;
@@ -198,6 +218,38 @@ function createSitePicarto(deps) {
         lastAt: lastAt,
         mode: modeOf()
       };
+    } catch (err) {
+      return { ok: false, error: 'unavailable' };
+    } finally {
+      ctx = previous;
+    }
+  }
+
+  // 金庫のトークンで GET /user だけ試し、値は返さない（題名は送らない）
+  async function checkAuth(params, passed) {
+    const box = passed || ctx;
+    const previous = ctx;
+    ctx = box || null;
+    try {
+      const config = await readConfig();
+      if (!config) {
+        return { ok: true, configured: false, auth: 'missing', status: 0, tokenLen: 0, tokenKind: 'none' };
+      }
+      const meta = tokenMeta(config.token);
+      const res = await call(ORIGIN + USER_PATH, {
+        method: 'GET',
+        headers: {
+          Authorization: 'Bearer ' + config.token,
+          Accept: 'application/json',
+          'User-Agent': UA
+        }
+      });
+      if (res.error) {
+        return Object.assign({ ok: true, configured: true, auth: res.error, status: res.status || 0 }, meta);
+      }
+      const kind = authClass(res.status, res.text);
+      const auth = kind === 'ok' ? 'ok' : (kind === 'unauthenticated' ? 'unauthenticated' : 'other');
+      return Object.assign({ ok: true, configured: true, auth: auth, status: res.status }, meta);
     } catch (err) {
       return { ok: false, error: 'unavailable' };
     } finally {
@@ -256,7 +308,10 @@ function createSitePicarto(deps) {
     loginNeeds: loginNeeds,
     updateMetadata: updateMetadata,
     getStatus: getStatus,
-    actions: { getStatus: panelStatus, setToken: setToken }
+    actions: { getStatus: panelStatus, setToken: setToken, checkAuth: checkAuth },
+    // 試験用に公開（本番の呼び出し口には出さない）
+    _authClass: authClass,
+    _tokenMeta: tokenMeta
   };
 }
 

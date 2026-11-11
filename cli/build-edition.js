@@ -24,9 +24,11 @@ async function main() {
 const result = await packager({
   dir: APP, name: 'marust', platform: 'win32', arch: 'x64', out: outBase,
   overwrite: true, executableName: 'marust', appVersion: pkg.version,
+  win32metadata: { CompanyName: pkg.name },
   icon: path.join(APP, 'assets', 'icon.ico'),
   ignore: [
     /^\/test(\/|$)/, /^\/docs(\/|$)/, /^\/types(\/|$)/,
+    /^\/work(\/|$)/,
     /^\/tsconfig\.json$/, /^\/dev-state(\/|$)/, /^\/\.git(\/|$)/,
     /^\/plugins(\/|$)/, /^\/plugins-author(\/|$)/,
     /^\/dist(\/|$)/, /^\/dist-author(\/|$)/, /^\/dist-core(\/|$)/,

@@ -197,17 +197,16 @@ function ensureHomePanel() {
   obsLine.appendChild(mk('button', 'timer-btn', STR.homeObsConnect, { id: 'home-obs-btn', type: 'button' }));
   section.appendChild(obsLine);
 
-  var setup = mk('div', 'timer-setup');
-  var l1 = mk('label', '', STR.homeTitleLabel + ' ');
+  var setup = mk('div', 'timer-setup home-title-setup');
+  var l1 = mk('label', 'home-title-field', STR.homeTitleLabel + ' ');
   l1.appendChild(mk('input', '', null, { id: 'home-title', type: 'text', maxlength: '200', autocomplete: 'off' }));
-  var l2 = mk('label', '', STR.homeCategoryLabel + ' ');
+  var l2 = mk('label', 'home-category-field', STR.homeCategoryLabel + ' ');
   l2.appendChild(mk('input', '', null, { id: 'home-category', type: 'text', maxlength: '100', autocomplete: 'off' }));
   setup.appendChild(l1);
   setup.appendChild(l2);
   setup.appendChild(mk('button', 'timer-btn primary', STR.homeApplyAll, { id: 'home-apply', type: 'button', 'data-need': 'write' }));
   setup.appendChild(mk('button', 'timer-btn', 'タイトル変更の詳細画面', { id: 'home-title-plugin-open', type: 'button' }));
   section.appendChild(setup);
-  section.appendChild(mk('p', 'timer-hint', '', { id: 'home-title-plugin-bar', 'aria-live': 'polite' }));
   section.appendChild(mk('p', 'timer-hint', '', { id: 'home-apply-status', 'aria-live': 'polite' }));
 
   // 配信ボタン: 全配信開始・全配信停止と、サイトごとのボタン（止まっている＝薄い赤、配信中＝明るい緑）
@@ -248,11 +247,14 @@ function ensureHomePanel() {
   card.appendChild(mk('div', 'timer-actions', null, { id: 'home-modal-foot' }));
   modal.appendChild(card);
   section.appendChild(modal);
+  // タイトル同期の状態は操作部の一番下にまとめる。失敗表示は再試行ボタンとして描く。
+  section.appendChild(mk('p', 'timer-hint home-title-plugin-bar', '', { id: 'home-title-plugin-bar', 'aria-live': 'polite' }));
   host.appendChild(section);
   return section;
 }
 
 function initHome() {
+  var call = panelCall('home');
   var root = ensureHomePanel();
   if (!root || root.dataset.bound === '1') return;
   root.dataset.bound = '1';
@@ -633,7 +635,11 @@ function initHome() {
   // 回線の見張りは開発者モードか上級（V3。manifest は public）
   function isAdvanced() { return typeof uiLevel !== 'undefined' && uiLevel === 'advanced'; }
   function isBasic() { return typeof uiLevel !== 'undefined' && uiLevel === 'basic'; }
+  // 初級と中級は同じホームフォームを使う。中級の追加機能は表示/ツールの
+  // タブから開き、ホームには配信サイトの簡易操作だけを残す。
+  function isSimpleHome() { return isBasic() || (typeof uiLevel !== 'undefined' && uiLevel === 'standard'); }
   var modalKey = '';
+  var skipModeRefreshId = '';
   function modalRow(g) {
     var hit = null;
     state.sites.forEach(function (r) { if (g.site && r.site === g.site) hit = r; });
@@ -660,7 +666,7 @@ function initHome() {
     var names = {};
     state.sites.forEach(function (r) { names[r.site] = r.name; });
     state.groups = streamGroups(state.allTargets, names, state.siteLive, state.destRows);
-    if (isBasic()) {
+    if (isSimpleHome()) {
       // 初級: 押すとそのサイトの設定が開く（開始・停止は上の 2 つのボタンだけ）。最後の「＋」でサイトを足す。
       streamRenderButtons(el('home-site-buttons'), state.groups, { alwaysOpen: true, onToggle: openSiteModal, onAdd: function () { openPanel('site-add'); } });
       return;
@@ -728,7 +734,7 @@ function initHome() {
     var off = !state.controlOn || !can.write;
     el('home-start').disabled = off || !state.ids.length;
     var ctlLabel = el('home-obs-control-label');
-    if (ctlLabel) ctlLabel.hidden = isBasic() && state.controlOn; // 初級: 止めてあるときだけ見せる
+    if (ctlLabel) ctlLabel.hidden = isSimpleHome() && state.controlOn; // 初級・中級: 止めてあるときだけ見せる
     var st = el('home-broadcast-status');
     if (!state.controlOn) say('home-broadcast-status', STR.homeNeedObsControl);
     else if (st.textContent === STR.homeNeedObsControl) say('home-broadcast-status', '');
@@ -768,37 +774,58 @@ function initHome() {
   function paintTitlePluginBar() {
     var bar = el('home-title-plugin-bar');
     if (!bar) return;
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
     var tp = state.titlePlugin;
     var activeSites = state.sites.filter(function (s) { return s.send; });
     if (!activeSites.length) {
-      bar.textContent = '【タイトル変更プラグイン】現在「題名を送る」がオンのサイトはありません（下のサイト一覧でオンにできます）';
+      bar.appendChild(document.createTextNode('【タイトル変更プラグイン】現在「題名を送る」がオンのサイトはありません（下のサイト一覧でオンにできます）'));
       return;
     }
     var resMap = {};
     if (tp && Array.isArray(tp.siteResults)) {
       tp.siteResults.forEach(function (r) { if (r && r.site) resMap[r.site] = r; });
     }
-    var parts = activeSites.map(function (s) {
+    var prefix = (tp && tp.phase === 'sending') ? '【タイトル変更プラグイン: 送信中…】 ' : '【タイトル変更プラグイン同期中】 ';
+    bar.appendChild(document.createTextNode(prefix));
+    activeSites.forEach(function (s, index) {
       var r = resMap[s.site];
       var status = '待機中';
       if (tp && tp.phase === 'sending') status = '送信中…';
+      else if (r && (r.mode === 'shadow' || r.message === 'dry-run')) status = '試験送信';
+      else if (r && r.result === 'unverified') status = '⚠反映未確認';
       else if (r && r.result === 'ok') status = '✓反映済';
       else if (r && (r.message === 'not-configured' || r.message === 'not-configured-timeout')) status = '⚠未設定';
       else if (r && r.result === 'error') status = '×失敗';
       else if (s.configured === false) status = '⚠未設定';
-      return s.name + ': ' + status;
+      if (index) bar.appendChild(document.createTextNode(' ／ '));
+      if (r && r.result === 'error') {
+        var retry = mk('button', 'timer-btn title-sync-retry', s.name + ': ' + status, { type: 'button', title: 'クリックしてタイトル同期を再試行' });
+        retry.addEventListener('click', function () {
+          var apply = el('home-apply');
+          if (apply && !apply.disabled) apply.click();
+        });
+        bar.appendChild(retry);
+      } else {
+        bar.appendChild(document.createTextNode(s.name + ': ' + status));
+      }
     });
-    var prefix = (tp && tp.phase === 'sending') ? '【タイトル変更プラグイン: 送信中…】 ' : '【タイトル変更プラグイン同期中】 ';
-    bar.textContent = prefix + parts.join(' ／ ');
   }
   function paintAll() {
+    var stopAll = el('home-stop-all');
+    var liveNow = typeof state.liveCount === 'number' && state.liveCount > 0;
+    if (stopAll) {
+      stopAll.classList.toggle('is-streaming', liveNow);
+      stopAll.classList.toggle('is-idle', state.liveCount === 0);
+      stopAll.classList.toggle('is-unknown', state.liveCount == null);
+      stopAll.setAttribute('aria-label', liveNow ? '配信中。全部止める' : '配信していません。全部止める');
+    }
     paintAlert(); paintTip(); paintObs(); paintSites(); paintButtons(); paintLine(); paintControl(); paintTitlePluginBar();
     if (modalKey && !Object.keys(keyBoxOpen).some(function (k) { return keyBoxOpen[k]; })) paintModal();
   }
 
   // ----- 読む -----
   function refreshFast() {
-    if (busyFast) return Promise.resolve();
+    if (busyFast || !visible() || document.hidden) return Promise.resolve();
     busyFast = true;
     var mode = { rows: [], targets: [] };
     return Promise.all([
@@ -861,20 +888,21 @@ function initHome() {
     }).then(function () { busyFast = false; }, function () { busyFast = false; });
   }
   function refreshSlow() {
-    if (busySlow) return;
+    if (busySlow || !visible() || document.hidden) return;
     busySlow = true;
     call('sites.loginStatus', {}).then(function (r) { state.login = r && r.ok === true && Array.isArray(r.sites) ? r.sites : null; paintSites(); })
       .catch(function () { state.login = null; })
       .then(function () { busySlow = false; });
   }
   function scheduleRefresh() {
+    burst.forEach(clearTimeout); burst = [];
     if (timerEvent) return;
     timerEvent = setTimeout(function () { timerEvent = null; if (visible()) refreshFast(); }, 400);
   }
-  // 押した直後は状態がすぐ変わるので、少しの間だけ読み直す（1・3・6・10 秒後）
+  // 配信操作のあと、イベント欠落に備えた読み直しを1回だけ予約する。
   function afterAction() {
     burst.forEach(clearTimeout);
-    burst = [1000, 3000, 6000, 10000].map(function (ms) { return setTimeout(function () { refreshFast(); }, ms); });
+    burst = [setTimeout(function () { if (visible() && !document.hidden) refreshFast(); }, 3000)];
   }
 
   // ----- 操作 -----
@@ -892,7 +920,7 @@ function initHome() {
     var g = t ? state.groups.filter(function (x) { return x.targets.indexOf(t) !== -1; })[0] : null;
     if (!t || !g) { say('home-broadcast-status', STR.broadcastRepasteHint); return; }
     keyBoxOpen[String(t.id)] = true;
-    if (isBasic()) { openSiteModal(g); return; }
+    if (isSimpleHome()) { openSiteModal(g); return; }
     if (g.site) openDetails[g.site] = true;
     lastSig = '';
     paintSites();
@@ -972,7 +1000,7 @@ function initHome() {
       var siteNow = sitesBox.querySelector('[data-main-site]');
       call('destination.setMain', { use: !!(useNow && useNow.checked), site: siteNow ? siteNow.value : '' }).then(function (res) {
         state.mainMsg = res && res.ok === true ? '' : (res && res.error === 'streaming' ? STR.mainOutputLocked : STR.mainOutputError(res && res.error));
-        lastSig = ''; refreshFast(); afterAction();
+        lastSig = ''; refreshFast();
       }).catch(function () { state.mainMsg = STR.mainOutputError('failed'); lastSig = ''; refreshFast(); });
       return;
     }
@@ -981,10 +1009,16 @@ function initHome() {
       var want = t.checked;
       var named = state.sites.filter(function (r) { return r.pluginId === id; })[0];
       if (want && confirmLiveWanted && !window.confirm(STR.homeSendConfirm(named ? named.name : id))) { t.checked = false; return; }
+      if (!want) skipModeRefreshId = id;
       call('sites.setSend', { id: id, send: want, confirmName: want ? id : undefined }).then(function (res) {
-        if (!res || res.ok === false) { t.checked = !want; window.alert(STR.sendSwitchError(res && res.error)); }
+        if (!res || res.ok === false) { skipModeRefreshId = ''; t.checked = !want; window.alert(STR.sendSwitchError(res && res.error)); return; }
+        if (!want) {
+          state.sites.forEach(function (row) { if (row.pluginId === id) row.send = false; });
+          paintSites(); paintTitlePluginBar();
+          return;
+        }
         refreshFast();
-      }).catch(function () { t.checked = !want; });
+      }).catch(function () { skipModeRefreshId = ''; t.checked = !want; });
     } else if (t.getAttribute('data-home-autoslot')) {
       var slotSite = t.getAttribute('data-home-autoslot');
       var slotWant = t.checked;
@@ -1095,17 +1129,21 @@ function initHome() {
   if (hubApi() && hubApi().subscribe) {
     hubApi().subscribe(function (msg) {
       if (msg && msg.name === 'broadcast.stopped') state.lastStopAt = Date.now();
+      if (msg && msg.name === 'modes.changed') {
+        var changedId = msg.payload && typeof msg.payload.id === 'string' ? msg.payload.id : '';
+        if (skipModeRefreshId && changedId === skipModeRefreshId) { skipModeRefreshId = ''; return; }
+        loadFrame();
+      }
       if (msg && HOME_EVENTS.indexOf(msg.name) !== -1) scheduleRefresh();
-      if (msg && msg.name === 'modes.changed') loadFrame();
     });
   }
   refreshFast();
   refreshSlow();
   loadFrame();
   // 起動直後は OBS・プラグインがまだ揃っていないことがあるので、最初だけ少し早めに読み直す
-  [2000, 5000, 9000].forEach(function (ms) { setTimeout(function () { refreshFast(); refreshSlow(); }, ms); });
+  setTimeout(function () { if (visible() && !document.hidden) refreshFast(); }, 3000);
   setInterval(function () { if (visible() && !document.hidden) refreshFast(); }, HOME_FAST_MS);
-  setInterval(refreshStats, 3000);
+  setInterval(function () { if (visible() && !document.hidden) refreshStats(); }, 3000);
   setInterval(function () { if (visible() && !document.hidden) refreshSlow(); }, HOME_SLOW_MS);
 }
 

@@ -16,6 +16,7 @@ const {
 } = require('../host/core/vault');
 const { createFakeBackend } = require('../host/core/vault-backends/fake');
 const { createElectronSafeStorageBackend } = require('../host/core/vault-backends/electron-safestorage');
+const { APP_NAME, configureElectronIdentity } = require('../host/core/electron-identity');
 
 const SECRET = 'plain-secret-SHOULD-NOT-LEAK-7f3a';
 const WHEN = new Date('2026-10-04T03:04:05.000Z');
@@ -83,6 +84,13 @@ function assertNoSecret(text) {
 }
 
 async function main() {
+  await test('Electron identity is aligned with the packaged marust vault', async () => {
+    const calls = [];
+    const fakeApp = { setName(value) { calls.push(value); } };
+    assert.strictEqual(configureElectronIdentity({ app: fakeApp }), true);
+    assert.deepStrictEqual(calls, [APP_NAME]);
+  });
+
   await test('undeclared names are also returned (getFor)（L8g: 以前は not-declared。悪意への守りを外した）', async () => {
     const bag = tempCore();
     try {

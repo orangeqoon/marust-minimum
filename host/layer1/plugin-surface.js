@@ -82,7 +82,7 @@ function manifestAsset(file, folder) {
 
 // パネルの名乗り（計画 X・P1）。本体はプラグインの名前を知らず、パネルが自分で言う。
 // aliases: 昔の配置に残っているパネルの id（読み替えて開く）。dock: 初めの配置で開く段階（standard／advanced）と順番。
-// menu: 上のメニューに出す行（in: view／file・title・desc・order・min・orDev）。言葉はプラグインが持つ。
+// menu: 上のメニューに出す行（in: view／tools／file・title・desc・order・min・orDev）。言葉はプラグインが持つ。
 const PANEL_ALIAS_RE = /^[a-z][a-z0-9:_-]{0,60}$/;
 function cleanPanelAliases(raw) {
   const out = [];
@@ -100,10 +100,12 @@ function cleanPanelMenu(raw) {
   if (typeof raw.title !== 'string' || raw.title.length < 1 || raw.title.length > 40) return null;
   return {
     key: raw.key,
+    // API の秘密欄フィルタは `key` という名前を落とすため、画面へ渡す非秘密の別名も持つ。
+    menuKey: raw.key,
     title: raw.title,
     desc: typeof raw.desc === 'string' ? raw.desc.slice(0, 160) : '',
     order: Number.isInteger(raw.order) && raw.order >= 0 && raw.order <= 999 ? raw.order : 500,
-    in: raw.in === 'file' ? 'file' : (raw.in === 'none' ? 'none' : 'view'), // none ＝ 上のメニューに出さない（見本など）
+    in: raw.in === 'file' ? 'file' : (raw.in === 'tools' ? 'tools' : (raw.in === 'none' ? 'none' : 'view')), // none ＝ 上のメニューに出さない（見本など）
     min: raw.min === 'advanced' ? 'advanced' : 'standard',
     orDev: raw.orDev === true
   };

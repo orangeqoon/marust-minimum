@@ -93,6 +93,7 @@ function ensureSitesPanel() {
   return section;
 }
 function initSites() {
+  var call = panelCall('sites');
   var root = ensureSitesPanel();
   if (!root || root.dataset.bound === '1') return;
   root.dataset.bound = '1';
@@ -101,6 +102,9 @@ function initSites() {
   var loginRows = null; // sites.loginStatus（ウィンドウだけ）。null のときはログイン列を出さない
   var siteInfo = {};    // hub.getState の site（ログインの種類・設定欄）
   var inlets = {};      // chat.inlets（サイトごとの今の入り口と、取り込まなかった件数）
+  var statusCache = {}, statusAttemptAt = {}, loaded = false, fullRequested = true, modesRequested = false;
+  var loginRequested = false, statusRequested = false, lastLoginAt = 0, changedSites = {};
+  var requestRefresh = function () {};
   // 丸スト内でコメントを受け取れるサイト（chatSource を持つ chat-*）には「受け取る／受け取らない」と入り口の表示を足す。
   function decorateReceive(td, site, byId, inletRows) {
     var row = null;
@@ -272,6 +276,7 @@ function initSites() {
   }
   // 結び直しは 1 つずつ。ブラウザの戻り先（localhost:3000）は全サイトで同じなので、重ねると前のほうが取り消される。
   var relinking = false;
+  var skipSendRefreshId = '';
   function relink(site, info) {
     if (!can.write) return;
     if (relinking) { window.alert(STR.sitesRelinkBusy); return; }
@@ -280,7 +285,7 @@ function initSites() {
     call('auth.reauth', { site: site }).then(function (res) {
       relinking = false;
       window.alert(res && res.ok === true ? STR.sitesRelinkDone : STR.loginErr(res && res.error));
-      refresh();
+      refresh({ site: site });
     }).catch(function () { relinking = false; window.alert(STR.loginErr('failed')); });
   }
   function showOauthForm(site, info) {
@@ -294,13 +299,14 @@ function initSites() {
     var guideEl = mk('p', 'timer-hint', guideText);
     if (site === 'youtube') guideEl.style.whiteSpace = 'pre-wrap';
     f.appendChild(guideEl);
+    f.appendChild(mk('p', 'timer-hint', STR.sitesOauthNotCalendar));
     var setup = mk('div', 'timer-setup');
     var idEl = field(setup, STR.sitesClientId, 'text', 'login-client-id');
     var secEl = field(setup, STR.sitesClientSecret, 'password', 'login-client-secret');
     var reEl = field(setup, STR.sitesRedirectLabel(rowInfo && rowInfo.defaultRedirect), 'text', 'login-redirect');
     f.appendChild(setup);
     var status = mk('p', 'timer-hint', '', { 'aria-live': 'polite' });
-    var run = mk('button', 'timer-btn primary', STR.sitesSaveAndLogin, { type: 'button' });
+    var run = mk('button', 'timer-btn primary', STR.sitesSaveTo(info.name || site), { type: 'button' });
     run.addEventListener('click', function () {
       if (!can.write) return;
       if (relinking) { status.textContent = STR.sitesRelinkBusy; return; }
@@ -315,7 +321,7 @@ function initSites() {
         return call('auth.reauth', { site: site }).then(function (r) {
           relinking = false;
           status.textContent = r && r.ok === true ? STR.sitesLoginOk : STR.loginErr(r && r.error);
-          refresh();
+          refresh({ site: site });
         });
       }).catch(function () { relinking = false; status.textContent = STR.loginErr('failed'); });
     });
@@ -340,16 +346,31 @@ function initSites() {
       Object.keys(inputs).forEach(function (k) { fields[k] = inputs[k].value; inputs[k].value = ''; });
       call('sites.setConfig', { site: site, fields: fields }).then(function (res) {
         status.textContent = res && res.ok === true ? STR.loginSaved : STR.loginErr(res && res.error);
-        refresh();
+        refresh({ site: site });
       }).catch(function () { status.textContent = STR.loginErr('failed'); });
     });
     f.appendChild(run);
     f.appendChild(status);
   }
-  function refresh() {
-    if (busy) return;
+  function refresh(options) {
+    if (options && options.modesOnly) modesRequested = true;
+    else if (options && typeof options.site === 'string') {
+      changedSites[options.site] = true;
+      loginRequested = true;
+    } else fullRequested = true;
+    requestRefresh();
+  }
+  function loadRefresh() {
+    if (busy || document.hidden || root.offsetParent === null) return Promise.resolve();
     busy = true;
-    call('modes.list', {}).then(function (res) {
+    var full = fullRequested || !loaded;
+    var readStatuses = full || statusRequested;
+    var modesOnly = modesRequested && !full && !loginRequested && !statusRequested && !Object.keys(changedSites).length;
+    var sitesToRead = changedSites;
+    var readLogin = full || loginRequested || (!modesOnly && Date.now() - lastLoginAt >= 30000);
+    var now = Date.now();
+    fullRequested = false; modesRequested = false; loginRequested = false; statusRequested = false; changedSites = {};
+    return call('modes.list', {}).then(function (res) {
       var rows = res && res.ok !== false && Array.isArray(res.plugins) ? res.plugins : [];
       var byId = {};
       var names = [];
@@ -369,20 +390,28 @@ function initSites() {
         var ia = SITE_ORDER.indexOf(a); var ib = SITE_ORDER.indexOf(b);
         return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
       });
-      var statuses = {};
+      var statuses = statusCache;
+      Object.keys(statuses).forEach(function (id) {
+        if (!byId[id]) { delete statuses[id]; delete statusAttemptAt[id]; }
+      });
       var pre = Promise.all([
-        call('sites.loginStatus', {}).then(function (r) { loginRows = r && r.ok === true && Array.isArray(r.sites) ? r.sites : null; }).catch(function () { loginRows = null; }),
-        call('chat.inlets', {}).then(function (r) { inlets = r && r.ok === true && r.inlets ? r.inlets : {}; }).catch(function () { inlets = {}; }),
-        call('hub.getState').then(function (st) {
+        readLogin ? call('sites.loginStatus', {}).then(function (r) { loginRows = r && r.ok === true && Array.isArray(r.sites) ? r.sites : null; lastLoginAt = Date.now(); }).catch(function () { loginRows = null; }) : Promise.resolve(),
+        !modesOnly ? call('chat.inlets', {}).then(function (r) { inlets = r && r.ok === true && r.inlets ? r.inlets : {}; }).catch(function () { inlets = {}; }) : Promise.resolve(),
+        full ? call('hub.getState').then(function (st) {
           siteInfo = {};
           ((st && st.plugins) || []).forEach(function (p) { if (p.site && p.site.id) siteInfo[p.site.id] = p.site; });
-        }).catch(function () {})
+        }).catch(function () {}) : Promise.resolve()
       ]);
       return pre.then(function () {
-        return Promise.all(Object.keys(byId).map(function (id) {
+        return Promise.all(Object.keys(byId).filter(function (id) {
+          var site = id.replace(/^(site|sink|chat|slot)-/, '');
+          var revalidate = !modesOnly && (typeof statusAttemptAt[id] !== 'number' || now - statusAttemptAt[id] >= 60000);
+          return !modesOnly && (readStatuses || sitesToRead[site] || revalidate);
+        }).map(function (id) {
+          statusAttemptAt[id] = Date.now();
           return call('plugin.' + id + '.getStatus', {}).then(function (r) { statuses[id] = r; }).catch(function () { statuses[id] = null; });
         }));
-      }).then(function () { paint(names, byId, statuses); });
+      }).then(function () { loaded = true; paint(names, byId, statuses); });
     }).catch(function () {
       while (box.firstChild) box.removeChild(box.firstChild);
       box.appendChild(mk('p', 'empty', STR.sitesLoadFailed));
@@ -396,10 +425,11 @@ function initSites() {
     var id = cb.getAttribute('data-send-id');
     var want = cb.checked;
     if (want && confirmLiveWanted && !window.confirm(STR.sitesSendConfirm(id))) { cb.checked = false; return; }
+    if (!want) skipSendRefreshId = id;
     call('sites.setSend', { id: id, send: want, confirmName: want ? id : undefined }).then(function (res) {
-      if (!res || res.ok === false) { cb.checked = !want; window.alert(STR.sendSwitchError(res && res.error)); }
-      refresh();
-    }).catch(function () { cb.checked = !want; });
+      if (!res || res.ok === false) { skipSendRefreshId = ''; cb.checked = !want; window.alert(STR.sendSwitchError(res && res.error)); return; }
+      if (want) refresh({ modesOnly: true });
+    }).catch(function () { skipSendRefreshId = ''; cb.checked = !want; });
   });
   // サイトごとの「受け取る／受け取らない」（丸スト内でコメントを受けるサイトだけ）
   box.addEventListener('change', function (ev) {
@@ -409,7 +439,7 @@ function initSites() {
     var want = cb.checked;
     call('sites.setReceive', { site: site, receive: want }).then(function (res) {
       if (!res || res.ok === false) { cb.checked = !want; window.alert(STR.receiveSwitchError(res && res.error)); }
-      refresh();
+      refresh({ modesOnly: true });
     }).catch(function () { cb.checked = !want; });
   });
   // サイトごとの「自動枠取り（オン／オフ）」
@@ -420,7 +450,7 @@ function initSites() {
     var want = cb.checked;
     call('sites.setAutoSlot', { site: site, enabled: want }).then(function (res) {
       if (!res || res.ok === false) { cb.checked = !want; window.alert(STR.autoSlotErr ? STR.autoSlotErr(res && res.error) : '切り替えに失敗しました'); }
-      refresh();
+      refresh({ modesOnly: true });
     }).catch(function () { cb.checked = !want; });
   });
   var expEl = root.querySelector('#sites-experimental');
@@ -431,13 +461,22 @@ function initSites() {
     call('ui.setSettings', { showExperimental: expEl.checked }).then(function () { refresh(); }).catch(function () {});
   });
   loadExperimental();
-  refresh();
-  setInterval(function () { if (root.offsetParent) refresh(); }, 15000);
-  if (hubApi() && hubApi().subscribe) {
-    hubApi().subscribe(function (msg) {
-      if (msg && msg.name === 'modes.changed') refresh();
-    });
-  }
+  requestRefresh = watchDisplay(root, loadRefresh, function (msg) {
+      if (msg && msg.name === 'modes.changed') {
+        var changedId = msg.payload && typeof msg.payload.id === 'string' ? msg.payload.id : '';
+        if (skipSendRefreshId && changedId === skipSendRefreshId) skipSendRefreshId = '';
+        modesRequested = true;
+        return true;
+      }
+      if (!msg) return false;
+      if (msg.name === 'plugin.reloaded') { fullRequested = true; return true; }
+      if (msg.name === 'auth.updated') loginRequested = true;
+      if (!/^(auth|site|slot|stream\.metadata|chat\.sent)/.test(msg.name || '')) return false;
+      var payload = msg.payload || {};
+      if (typeof payload.site === 'string') changedSites[payload.site] = true;
+      else if (msg.name === 'stream.metadata.changed') statusRequested = true;
+      return true;
+  });
 }
 
 registerPanel('sites', initSites);

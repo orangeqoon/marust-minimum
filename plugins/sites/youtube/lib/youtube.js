@@ -71,6 +71,7 @@ function createYoutube(deps) {
   }
 
   async function once(method, path, query, body, token) {
+    if (method !== 'GET' && typeof d.canWrite === 'function' && !d.canWrite()) throw fail('retired');
     const url = new URL(ROOT + path);
     const keys = Object.keys(query || {});
     for (let i = 0; i < keys.length; i += 1) url.searchParams.set(keys[i], String(query[keys[i]]));
@@ -133,6 +134,68 @@ function createYoutube(deps) {
   }
 
   // ----- 読み取り -----
+
+  // 内部照合専用。返値のexpectedは保存・ログ・公開APIへ渡さない。
+  async function readIngest(opts) {
+    const streamId = opts && typeof opts.streamId === 'string' ? opts.streamId.trim() : '';
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(streamId)) return { ok: false, code: 'invalid-input' };
+    try {
+      const json = await api('GET', 'liveStreams', { part: 'cdn', id: streamId });
+      if (!json || !Array.isArray(json.items) || json.items.length !== 1 || json.items[0].id !== streamId) throw fail('invalid-response');
+      const cdn = json.items[0].cdn;
+      const info = cdn && cdn.ingestionInfo;
+      if (!info || cdn.ingestionType !== 'rtmp' || typeof info.streamName !== 'string' || !info.streamName) throw fail('invalid-response');
+      const servers = [];
+      for (const key of ['ingestionAddress', 'backupIngestionAddress', 'rtmpsIngestionAddress', 'rtmpsBackupIngestionAddress']) {
+        if (typeof info[key] !== 'string' || !info[key]) continue;
+        const url = new URL(info[key]);
+        if (!['rtmp:', 'rtmps:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw fail('invalid-response');
+        servers.push(info[key]);
+      }
+      if (!servers.length) throw fail('invalid-response');
+      return { ok: true, streamId, expected: { server: servers[0], servers, key: info.streamName } };
+    } catch (err) { return wrap(err); }
+  }
+
+  /** 指定した枠だけを読み、実開始時刻と live 状態を返す（不明時の補正用）。 */
+  async function readBroadcastTiming(opts) {
+    const o = opts || {};
+    const broadcastId = typeof o.broadcastId === 'string' ? o.broadcastId.trim() : '';
+    const streamId = typeof o.streamId === 'string' ? o.streamId.trim() : '';
+    if (!broadcastId || !streamId) return { ok: false, code: 'invalid-input' };
+    try {
+      const json = await api('GET', 'liveBroadcasts', { part: 'snippet,status,contentDetails', id: broadcastId });
+      if (!json || !Array.isArray(json.items) || json.items.length !== 1) throw fail('invalid-response');
+      const item = json.items[0];
+      if (!item || typeof item !== 'object' || item.id !== broadcastId) throw fail('invalid-response');
+      const boundStreamId = item.contentDetails && item.contentDetails.boundStreamId;
+      const bound = boundStreamId === streamId;
+      if (!bound && !(o.allowUnbound === true && (boundStreamId == null || boundStreamId === ''))) throw fail('invalid-response');
+      const lifecycle = item.status && item.status.lifeCycleStatus;
+      if (!['created', 'ready', 'testing', 'testStarting', 'liveStarting', 'live', 'complete', 'revoked'].includes(lifecycle)) throw fail('invalid-response');
+      if (!bound && !['created', 'ready'].includes(lifecycle)) throw fail('invalid-response');
+      if (!item.snippet || typeof item.snippet !== 'object') throw fail('invalid-response');
+      let actualStartMs = 0;
+      const actualStartTime = item.snippet.actualStartTime;
+      if (actualStartTime != null) {
+        if (typeof actualStartTime !== 'string') throw fail('invalid-response');
+        actualStartMs = Date.parse(actualStartTime);
+        if (!Number.isFinite(actualStartMs)) throw fail('invalid-response');
+      }
+      const out = {
+        ok: true,
+        broadcastId: broadcastId,
+        actualStartMs: actualStartMs,
+        streamId: streamId,
+        live: lifecycle === 'live'
+      };
+      if (o.includeState === true) { out.lifeCycleStatus = lifecycle; out.bound = bound; }
+      else if (o.allowUnbound === true) out.bound = bound;
+      return out;
+    } catch (err) {
+      return wrap(err);
+    }
+  }
 
   async function listActive() {
     try {
@@ -264,9 +327,14 @@ function createYoutube(deps) {
       const active = await listActive();
       if (!active.ok) return active;
       if (active.items.length) {
-        const first = active.items[0];
+        const expectedStream = typeof o.streamId === 'string' ? o.streamId.trim() : '';
+        const candidates = expectedStream ? active.items.filter(item => item.contentDetails && item.contentDetails.boundStreamId === expectedStream) : active.items;
+        if (candidates.length !== 1) return { ok: false, code: candidates.length === 0 ? 'stream-mismatch' : 'broadcast-ambiguous' };
+        const first = candidates[0];
         const startedAt = first.snippet && first.snippet.actualStartTime ? Date.parse(first.snippet.actualStartTime) : NaN;
-        return { ok: true, created: false, broadcastId: first.id || '', liveChatId: chatOf(first), actualStartMs: Number.isFinite(startedAt) ? startedAt : 0 };
+        const out = { ok: true, created: false, broadcastId: first.id || '', liveChatId: chatOf(first), actualStartMs: Number.isFinite(startedAt) ? startedAt : 0 };
+        if (first.contentDetails && typeof first.contentDetails.boundStreamId === 'string') out.streamId = first.contentDetails.boundStreamId;
+        return out;
       }
       const stream = await resolveStreamId(o.streamId);
       if (!stream.ok) return stream;
@@ -368,13 +436,15 @@ function createYoutube(deps) {
       let description = defaultDescription;
       let oldChat = '';
       if (active.items.length) {
-        const cur = active.items[0];
+        const cur = o.oldBroadcastId ? active.items.find(item => item.id === o.oldBroadcastId && (!o.streamId || (item.contentDetails && item.contentDetails.boundStreamId === o.streamId))) : active.items[0];
+        if (!cur) return { ok: false, code: 'invalid-response' };
         oldId = cur.id || '';
         oldChat = chatOf(cur);
         const inherited = inheritFrom(cur.snippet);
         if (inherited.title) title = inherited.title;
         if (inherited.description) description = inherited.description;
       }
+      if (o.oldBroadcastId && !oldId) return { ok: false, code: 'invalid-response' };
       const stream = await resolveStreamId(o.streamId);
       if (!stream.ok) return Object.assign({}, stream, made ? { newId: made.id, liveChatId: made.liveChatId, bound: bound } : {});
       const fresh = !made;
@@ -441,6 +511,8 @@ function createYoutube(deps) {
   }
 
   return {
+    readIngest,
+    readBroadcastTiming,
     listActive,
     listUpcoming,
     listLatest,

@@ -273,7 +273,7 @@ function setup() {
     ['streaming', 'live', 'changed-since-inspect', 'mode-write-failed', 'not-inspected', 'provides-not-allowed', 'secret-namespace', 'id-reserved', 'bad-id', 'no-backup'].forEach((code) => assert.ok(STR.pluginInstallErr(code).length > 0, code));
     // 中級の「機能を足す」には入れる・探すを置かない
     assert.ok(!read('plugins/ui-standard/shell/panels/features.js').includes('plugin.inspect') && !read('plugins/ui-standard/shell/panels/features.js').includes('plugins.browse'));
-    assert.ok(read('plugins/ui-standard/shell/menubar.js').includes("['plugin-manager', STR.pluginManagerMenu, { min: 'advanced' }]"), '上級だけ');
+    assert.ok(read('plugins/ui-standard/shell/menubar.js').includes("['plugin-manager', STR.pluginManagerMenuLabel, { min: 'advanced' }]"), '上級だけ');
   });
 
   if (failed) { console.error('\n[p4b] ' + failed + ' failed'); process.exit(1); }

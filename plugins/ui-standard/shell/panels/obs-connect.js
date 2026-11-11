@@ -113,7 +113,7 @@ function initObsConnect() {
     }).catch(function () { say(statusEl, STR.obsErr('failed')); }).then(refresh);
   });
   refresh();
-  setInterval(function () { if (root.offsetParent) refresh(); }, 15000);
+  setInterval(function () { if (root.offsetParent && !document.hidden) refresh(); }, 15000);
 }
 
 registerPanel('obs-connect', initObsConnect);

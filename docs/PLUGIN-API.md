@@ -11,15 +11,17 @@
 | `for` | 効くサイトの id の配列。全部なら `["*"]`。「機能」「プラグインの管理」の「サイトごと」とホームのサイトの枠に使う |
 | `tags` | 検索用の自由な語 |
 | `owns` | `{ events, parentActions }`。イベント／親の窓の操作の持ち主（内蔵だけ有効。先に名乗ったものが勝つ） |
-| `panels[].aliases／dock／dockOrder／menu` | 昔の配置の id・初めの配置で開く段階・上のメニューの行（`in: view／file／none`） |
+| `panels[].aliases／dock／dockOrder／menu` | 昔の配置の id・初めの配置で開く段階・上のメニューの行（`in: view／tools／file／none`）。`key` は画面用の分類名で、出口では秘密欄の規則を避ける `menuKey` も付く |
 | `feature.needs` | `login:<サイト>`・`site:<サイト>`（入っていなければ読み込まず「入っていない」と出す）・`obs` |
 | `feature.tip／tipAliases` | 3 回配信したあとの紹介の文と昔の id |
 | `site.order／autoSlot` | サイトを並べる順・自動枠取りの部品を持つか |
-| `needs: ["title.reserved"]／["keys"]` | 予約の自動送信／キーの口（セットのうち最初の 1 つだけ。自分で足したものは持てない） |
+| `needs: ["title.reserved"]／["keys"]` | 予約の自動送信／キーの口（予約送信は出どころを問わず宣言した複数のプラグインが利用可能。キーはセットの最初の 1 つだけ） |
 | `provides` の新しい役割 | `site.login@1` `tips.source@1` `storage.locator@1`（`test/contracts/` に約束の試験） |
 | `kind: "set"` | セット（データだけ。`set: { label, members }`）。`features.sets`／`features.setSet` で入／切 |
 | `isDefault` | テーマの「標準」の印（内蔵だけ） |
 `ctx.api`（`register`・`call`）・`ctx.peers` は内蔵だけ。役割ごとの約束は `test/contracts/index.js`、「1 つ抜き」は `test/x5-contracts.test.js`。
+
+プラグインの保存データが変わったときは、汎用の`plugin.dataChanged`イベントを使える。payloadの`topic`でデータの種類を区別する。受け取る側はpayloadの自己申告を信じず、登録簿が付けた`meta.source`を確認する。秘密や外部サービスの生応答は載せない。保存・履歴・同期の実装は各プラグインが持ち、本体は通知名だけを知る。
 
 ## AI の回し方（V0.5。丸ストの再起動もビルドも要らない）
 
@@ -586,8 +588,10 @@ ARCHITECTURE の役割表にある `upsertTarget` は、今の実装では 1 関
 | `overlay` | `ctx.overlay` | オーバーレイへ値を出す |
 | `chat` | `ctx.chat` | コメントの取り込みと入り口の宣言 |
 | `destinations` | `ctx.destinations` | 配信先の一覧と集計 |
+| `operations.exclusive` | `ctx.operations.run(task)` | 同じプラグインの世代をまたぐ排他。taskへisCurrentを渡す。宣言必須 |
 | `obs.read` | `ctx.obs.getStreamStatus` / `ctx.obs.isStreaming` | OBS の配信状態を読む |
 | `obs.streamControl` | `ctx.obs.streamControl` | 配信全体の開始・停止 |
+| `obs.outputControl` | `ctx.outputs.check` / `ctx.outputs.control` | 実送信先の内部照合と証明付き出力制御。宣言必須 |
 | `api.register` | `ctx.api.register` | 窓口にメソッドを足す |
 | `api.call` | `ctx.api.call` | 窓口のメソッドを呼ぶ |
 | `peers` | `ctx.peers` | ほかのプラグインの決まったメソッド |

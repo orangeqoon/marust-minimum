@@ -123,26 +123,60 @@ function createSiteLogin(options) {
     return { ok: true, sites: out, extension: { paired: !!(facts.extension && facts.extension.paired === true) } };
   }
 
-  /** アプリの鍵（client_id・client_secret・戻り先）を金庫へ。ほかの項目（トークン）は残す。 */
-  async function setOAuthApp(input) {
-    const given = asObject(input) || {};
-    const id = String(given.site || '');
-    if (!Object.prototype.hasOwnProperty.call(OAUTH_NAMES, id)) return { ok: false, error: 'unknown-site' };
-    const name = OAUTH_NAMES[id];
+  /**
+   * 他用途の金庫に同じ client_id が無いか見る（値は返さない・ログにも出さない）。
+   * Google カレンダー用 (google.oauth) とサイト用 (youtube/twitch/kick.oauth) の取り違え防止。
+   */
+  async function clientIdConflicts(targetName, clientId) {
+    const needle = String(clientId || '').trim();
+    if (!needle) return false;
+    const names = Object.keys(OAUTH_NAMES).map(function (k) { return OAUTH_NAMES[k]; });
+    for (let i = 0; i < names.length; i += 1) {
+      const name = names[i];
+      if (name === targetName) continue;
+      const read = await readJson(name);
+      if (!read.ok) continue;
+      const doc = asObject(read.doc);
+      if (!doc || typeof doc.client_id !== 'string') continue;
+      if (doc.client_id.trim() === needle) return true;
+    }
+    return false;
+  }
+
+  async function saveAppKeys(name, given) {
     if (!nonEmpty(given.clientId) || given.clientId.length > MAX_FIELD) return { ok: false, error: 'bad-client-id' };
     if (!nonEmpty(given.clientSecret) || given.clientSecret.length > MAX_FIELD) return { ok: false, error: 'bad-client-secret' };
     const redirect = nonEmpty(given.redirectUri) ? given.redirectUri.trim() : '';
     if (redirect && !LOOPBACK_RE.test(redirect)) return { ok: false, error: 'bad-redirect' };
+    const clientId = given.clientId.trim();
+    if (await clientIdConflicts(name, clientId)) return { ok: false, error: 'key-role-mismatch' };
     const read = await readJson(name);
     const base = read.ok && asObject(read.doc) ? Object.assign({}, read.doc) : {};
-    base.client_id = given.clientId.trim();
+    base.client_id = clientId;
     base.client_secret = given.clientSecret.trim();
     if (redirect) base.redirect_uri = redirect;
+    if (!secrets || typeof secrets.set !== 'function') return { ok: false, error: 'unavailable' };
     const saved = await secrets.set(name, JSON.stringify(base));
     return saved && saved.ok === true ? { ok: true } : { ok: false, error: saved && saved.error ? saved.error : 'unavailable' };
   }
 
-  return { status, setOAuthApp };
+  /** サイト用（YouTube / Twitch / Kick）のアプリ鍵。google.oauth には絶対に書かない。 */
+  async function setOAuthApp(input) {
+    const given = asObject(input) || {};
+    const id = String(given.site || '');
+    if (OAUTH_SITES.indexOf(id) === -1) return { ok: false, error: 'unknown-site' };
+    const name = OAUTH_NAMES[id];
+    if (name === GOOGLE_SECRET) return { ok: false, error: 'unknown-site' };
+    return saveAppKeys(name, given);
+  }
+
+  /** Google カレンダー専用のアプリ鍵。常に google.oauth だけへ書く（site 指定では飛ばない）。 */
+  async function setCalendarOAuthApp(input) {
+    const given = asObject(input) || {};
+    return saveAppKeys(GOOGLE_SECRET, given);
+  }
+
+  return { status, setOAuthApp, setCalendarOAuthApp };
 }
 
 module.exports = { createSiteLogin, oauthState, OAUTH_SITES, OAUTH_NAMES };

@@ -50,11 +50,17 @@ try {
 // 画面側の流れ（ソースの検査）: 離れる前に保存 → 保存できなくても切り替える → 切り替え直後だけ使う。初級は保存・復元しない
 const menubar = fs.readFileSync(path.join(ROOT, 'plugins', 'ui-standard', 'shell', 'menubar.js'), 'utf8');
 const dockSrc = fs.readFileSync(path.join(ROOT, 'plugins', 'ui-standard', 'shell', 'core', 'dock.js'), 'utf8');
-const body = menubar.slice(menubar.indexOf('function saveLeavingLayout'), menubar.indexOf('function setUiLevel') + 700);
+const persistStart = menubar.indexOf('function persistLevelLayout');
+assert.ok(persistStart !== -1, 'persistLevelLayout がある');
+const body = menubar.slice(persistStart, menubar.indexOf('function setUiLevel') + 700);
 assert.ok(body.indexOf("uiLevel === 'basic'") !== -1, '初級は保存しない');
 assert.ok(body.indexOf("'layout.saveLevel'") !== -1 && body.indexOf('saveLeavingLayout().then') !== -1);
 assert.ok(body.indexOf("call('ui.setSettings'") > body.indexOf('saveLeavingLayout().then'), '保存のあとで切り替える');
+assert.ok(body.indexOf('flushPersistLevelLayout') !== -1, 'レベル切替は flush 経由');
 assert.ok(dockSrc.includes("call('layout.getLevel'") && dockSrc.includes("uiLevel !== 'basic'") && dockSrc.includes('LEVEL_SWITCH_KEY'));
+assert.ok(dockSrc.includes('named.builtin !== true'), '同梱標準だけでは起動復元しない');
+assert.ok(dockSrc.includes('watchLevelLayoutPersist') || menubar.includes('watchLevelLayoutPersist'), 'レベル配置の自動保存を見張る');
+assert.ok(menubar.includes('schedulePersistLevelLayout') && menubar.includes('flushPersistLevelLayout'), 'debounce と閉じるときの flush');
 const api = require('./_api-source').read();
 assert.ok(api.includes("'layout.saveLevel'") && api.includes("'layout.getLevel'"));
 console.log('[marust] level layouts tests passed');

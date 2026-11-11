@@ -155,6 +155,17 @@ function createSiteSoop(deps) {
       || host === 'sooplive.co.kr' || host.endsWith('.sooplive.co.kr');
   }
 
+  // 配信情報取得APIをタイトル保存先として誤採用しない。2xxだけ返すAPIを
+  // 保存成功と誤表示しないため、キャプチャのパスも保存APIに限定する。
+  function isSaveEndpoint(value) {
+    try {
+      const parsed = new URL(value);
+      return /^\/broad\/setting\/?$/i.test(parsed.pathname || '');
+    } catch (_) {
+      return false;
+    }
+  }
+
   function parseCapture(raw) {
     const data = parseJson(raw);
     if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
@@ -162,6 +173,7 @@ function createSiteSoop(deps) {
     const body = formObject(data.raw_body) || formObject(data.body);
     if (!body) return null;
     const url = typeof data.url === 'string' && data.url.trim() ? data.url.trim() : DEFAULT_URL;
+    if (!isSaveEndpoint(url)) return null;
     return { url: url, body: body };
   }
 
@@ -197,7 +209,8 @@ function createSiteSoop(deps) {
       return { error: 'network' };
     }
     const host = String(parsed.hostname || '').toLowerCase().replace(/\.+$/, '');
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !soopHost(host)) {
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || !soopHost(host)
+      || !/^\/broad\/setting\/?$/i.test(parsed.pathname || '')) {
       return { error: 'network' };
     }
     const options = Object.assign({ redirect: 'manual', cache: 'no-store' }, init || {});

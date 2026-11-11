@@ -393,12 +393,61 @@ function createPluginHost(opts) {
   var siblingsByPlugin = new Map();
   var relayByPlugin = new Map();
   var parentByPlugin = new Map();
+  // Dockview moves an iframe into a real popout window.  Its postMessage
+  // target then becomes that window, not the main hub window, so keep the
+  // same guarded handler attached to every live document that can own a
+  // plugin panel.
+  var messageWindows = [];
   var menuRows = [];
   var slotOwners = {};
   var permissions = [];
   var described = null;
   var describedSig = null;
   var unsub = null;
+  var ownedDisposers = [];
+  var activityGroups = [];
+  var activityOwners = [];
+  var syncingActivity = false;
+  var hostDisposed = false;
+  var activityGroupRecords = [];
+  var activityOwnerRecords = [];
+
+  function ownDisposable(value) {
+    var dispose = null;
+    if (typeof value === 'function') dispose = value;
+    else if (value && typeof value.dispose === 'function') dispose = function () { value.dispose(); };
+    if (!dispose) return null;
+    var wrapped = function () {
+      var index = ownedDisposers.indexOf(wrapped);
+      if (index !== -1) ownedDisposers.splice(index, 1);
+      try { dispose(); } catch (_) {}
+    };
+    ownedDisposers.push(wrapped);
+    return wrapped;
+  }
+
+  function listenEvent(target, name, fn) {
+    if (!target || typeof target[name] !== 'function') return false;
+    try {
+      return ownDisposable(target[name](fn)) || true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function listenDom(target, name, fn) {
+    try {
+      if (!target || typeof target.addEventListener !== 'function') return false;
+      target.addEventListener(name, fn);
+      return ownDisposable(function () {
+        try {
+          if (typeof target.removeEventListener === 'function') target.removeEventListener(name, fn);
+        } catch (_) { /* 窓が閉じたあと */ }
+      });
+    } catch (_) {
+      return false;
+    }
+  }
 
   function currentSiblings(pluginId) {
     var list = siblingsByPlugin.get(pluginId);
@@ -494,11 +543,258 @@ function createPluginHost(opts) {
     if (!target || typeof target.postMessage !== 'function') return;
     var body = plainClone(message);
     if (!body || typeof body !== 'object') return;
+    var owner = slot.iframe.ownerDocument && slot.iframe.ownerDocument.defaultView;
+    if (owner && owner !== win && messageWindows.indexOf(owner) !== -1 && typeof owner.marustPostToPanel === 'function') {
+      owner.marustPostToPanel(target, body);
+      return;
+    }
     target.postMessage(body, '*');
   }
 
   function postPerm(slot) {
     post(slot, messages.permMessage(permissions));
+  }
+
+  // Dockviewのタブ状態をiframeへ伝える。ポップアップではwindow自体が表示中でも
+  // タブだけが非表示になるため、document.hiddenだけに依存しない。
+  function postActivity(slot) {
+    if (!slot) return;
+    post(slot, { type: 'marust:panel-activity', active: slot.active !== false, panelId: slot.panelId });
+  }
+
+  function markActivity(name, slot) {
+    try {
+      if (win && win.marustUiMetrics && typeof win.marustUiMetrics.mark === 'function') {
+        win.marustUiMetrics.mark(name, { panelId: slot && slot.panelId || '' });
+      }
+    } catch (_) { /* 計測は本体動作を妨げない */ }
+  }
+
+  function setSlotActivity(panelId, active) {
+    if (typeof panelId !== 'string' || !panelId) return;
+    slots.forEach(function (slot) {
+      if (slot.disposed || slot.panelId !== panelId) return;
+      var next = active === true;
+      if (slot.active === next) return;
+      slot.active = next;
+      postActivity(slot);
+      markActivity(next ? 'popout-panel-active' : 'popout-panel-inactive', slot);
+    });
+  }
+
+  function activePanelId(panel) {
+    return panel && typeof panel.id === 'string' ? panel.id : '';
+  }
+
+  function groupPanelIds(panel) {
+    var group = panel && panel.group;
+    var list = group && (group.panels || (group.api && group.api.panels));
+    if (!Array.isArray(list)) return [];
+    return list.map(function (item) { return activePanelId(item); }).filter(Boolean);
+  }
+
+  function panelGroup(panel) {
+    return panel && (panel.group || (panel.api && panel.api.group));
+  }
+
+  function groupPanels(group) {
+    var api = group && group.api;
+    var list = group && (group.panels || (api && api.panels));
+    return Array.isArray(list) ? list : [];
+  }
+
+  function groupActivePanel(group) {
+    var api = group && group.api;
+    return (group && group.activePanel) || (api && api.activePanel) || null;
+  }
+
+  function groupVisible(group) {
+    var api = group && group.api;
+    if (api && typeof api.isVisible === 'boolean') return api.isVisible;
+    if (group && typeof group.isVisible === 'boolean') return group.isVisible;
+    return true;
+  }
+
+  function groupOwner(group) {
+    var api = group && group.api;
+    var owner = null;
+    try {
+      if (api && typeof api.getWindow === 'function') owner = api.getWindow();
+      else if (group && typeof group.getWindow === 'function') owner = group.getWindow();
+    } catch (_) { owner = null; }
+    try { if (!owner && group && group.element && group.element.ownerDocument) owner = group.element.ownerDocument.defaultView; } catch (_) { /* inaccessible document */ }
+    return owner || win;
+  }
+
+  function activityOwnerDocument(owner) {
+    try { return owner && (owner.document || (owner === win ? doc : null)); } catch (_) { return null; }
+  }
+
+  function ownerVisible(owner) {
+    try {
+      if (owner && owner.closed === true) return false;
+      var ownerDocument = activityOwnerDocument(owner);
+      if (!ownerDocument || ownerDocument.hidden === true) return false;
+      if (owner && owner.hidden === true) return false;
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function activityOwnerRecord(owner) {
+    var found = null;
+    activityOwnerRecords.forEach(function (record) {
+      if (!found && record.owner === owner) found = record;
+    });
+    return found;
+  }
+
+  function disposeActivityOwner(record) {
+    if (!record) return;
+    record.disposers.slice().reverse().forEach(function (dispose) { dispose(); });
+    var ownerIndex = activityOwners.indexOf(record.owner);
+    if (ownerIndex !== -1) activityOwners.splice(ownerIndex, 1);
+    var recordIndex = activityOwnerRecords.indexOf(record);
+    if (recordIndex !== -1) activityOwnerRecords.splice(recordIndex, 1);
+  }
+
+  function attachActivityOwner(owner, group) {
+    if (hostDisposed || !owner) return null;
+    var record = activityOwnerRecord(owner);
+    if (!record) {
+      record = { owner: owner, document: null, groups: [], disposers: [], documentDispose: null, windowDispose: null };
+      activityOwnerRecords.push(record);
+      activityOwners.push(owner);
+      var changed = function () { syncActivity(); };
+      var ownerDocument = activityOwnerDocument(owner);
+      var docDispose = ownerDocument ? listenDom(ownerDocument, 'visibilitychange', changed) : null;
+      var winDispose = listenDom(owner, 'visibilitychange', changed);
+      record.document = ownerDocument;
+      record.documentDispose = typeof docDispose === 'function' ? docDispose : null;
+      record.windowDispose = typeof winDispose === 'function' ? winDispose : null;
+      if (record.documentDispose) record.disposers.push(record.documentDispose);
+      if (record.windowDispose) record.disposers.push(record.windowDispose);
+    } else {
+      var nextDocument = activityOwnerDocument(owner);
+      if (record.document !== nextDocument) {
+        var oldDispose = record.documentDispose;
+        if (oldDispose) oldDispose();
+        record.disposers = record.disposers.filter(function (dispose) { return dispose !== oldDispose; });
+        var changedAgain = function () { syncActivity(); };
+        var nextDispose = nextDocument ? listenDom(nextDocument, 'visibilitychange', changedAgain) : null;
+        record.documentDispose = typeof nextDispose === 'function' ? nextDispose : null;
+        if (record.documentDispose) record.disposers.unshift(record.documentDispose);
+        record.document = nextDocument;
+      }
+    }
+    if (group && record.groups.indexOf(group) === -1) record.groups.push(group);
+    return record;
+  }
+
+  function activityGroupRecord(group) {
+    var found = null;
+    activityGroupRecords.forEach(function (record) {
+      if (!found && record.group === group) found = record;
+    });
+    return found;
+  }
+
+  function bindActivityGroupOwner(record, owner) {
+    if (!record) return;
+    if (record.owner === owner) {
+      attachActivityOwner(owner, record.group);
+      return;
+    }
+    var previous = activityOwnerRecord(record.owner);
+    if (previous) {
+      var previousIndex = previous.groups.indexOf(record.group);
+      if (previousIndex !== -1) previous.groups.splice(previousIndex, 1);
+      if (!previous.groups.length && previous.owner !== win) disposeActivityOwner(previous);
+    }
+    record.owner = owner;
+    attachActivityOwner(owner, record.group);
+  }
+
+  function attachActivityGroup(group) {
+    if (hostDisposed || !group) return;
+    var existing = activityGroupRecord(group);
+    if (existing) {
+      bindActivityGroupOwner(existing, groupOwner(group));
+      return;
+    }
+    var record = { group: group, owner: groupOwner(group), disposers: [] };
+    activityGroups.push(group);
+    activityGroupRecords.push(record);
+    var target = group.api || group;
+    var activeDispose = listenEvent(target, 'onDidActivePanelChange', function () { syncActivity(); });
+    var visibleDispose = listenEvent(target, 'onDidVisibilityChange', function () { syncActivity(); });
+    var locationDispose = listenEvent(target, 'onDidLocationChange', function () { syncActivity(); });
+    if (typeof activeDispose === 'function') record.disposers.push(activeDispose);
+    if (typeof visibleDispose === 'function') record.disposers.push(visibleDispose);
+    if (typeof locationDispose === 'function') record.disposers.push(locationDispose);
+    attachActivityOwner(record.owner, group);
+  }
+
+  function disposeActivityGroup(group) {
+    var index = activityGroups.indexOf(group);
+    if (index === -1) return;
+    var record = activityGroupRecords[index];
+    if (record) record.disposers.slice().reverse().forEach(function (dispose) { dispose(); });
+    activityGroups.splice(index, 1);
+    activityGroupRecords.splice(index, 1);
+    if (!record) return;
+    var owner = activityOwnerRecord(record.owner);
+    if (!owner) return;
+    var groupIndex = owner.groups.indexOf(group);
+    if (groupIndex !== -1) owner.groups.splice(groupIndex, 1);
+    if (!owner.groups.length && owner.owner !== win) disposeActivityOwner(owner);
+  }
+
+  function dockGroups() {
+    if (!dockview) return [];
+    try {
+      return Array.isArray(dockview.groups) ? dockview.groups : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function syncActivity(fallbackPanel) {
+    if (hostDisposed || syncingActivity) return;
+    syncingActivity = true;
+    try {
+      var groups = dockGroups();
+      var hasGroups = groups.length > 0;
+      var seen = {};
+      groups.forEach(function (group) {
+        attachActivityGroup(group);
+        var active = activePanelId(groupActivePanel(group));
+        var allowed = groupVisible(group) && ownerVisible(groupOwner(group));
+        var panels = groupPanels(group);
+        if (panels.length) {
+          panels.forEach(function (panel) {
+            var id = activePanelId(panel);
+            if (!id) return;
+            if (parsePluginPanelId(id)) ensureAlwaysRenderer(panel);
+            seen[id] = true;
+            setSlotActivity(id, allowed && id === active);
+          });
+        } else if (active) {
+          seen[active] = true;
+          setSlotActivity(active, allowed);
+        }
+      });
+      if (!hasGroups && fallbackPanel) applyActivePanel(fallbackPanel);
+    } finally {
+      syncingActivity = false;
+    }
+  }
+
+  function applyActivePanel(panel) {
+    var id = activePanelId(panel);
+    if (!id) return;
+    var ids = groupPanelIds(panel);
+    if (!ids.length) { setSlotActivity(id, true); return; }
+    ids.forEach(function (panelId) { setSlotActivity(panelId, panelId === id); });
   }
 
   // iframe パネルへのテーマ（V8）。本体の画面に当たっている検査済みの色だけを、形を確かめ直して値だけ渡す（CSS の文字列・URL は渡さない）。
@@ -524,9 +820,7 @@ function createPluginHost(opts) {
   function postThemeAll() {
     slots.forEach(function (slot) { postTheme(slot); });
   }
-  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-    document.addEventListener('marust:theme-applied', postThemeAll);
-  }
+  listenDom(doc, 'marust:theme-applied', postThemeAll);
 
   function postPermAll() {
     slots.forEach(function (slot) { postPerm(slot); });
@@ -654,6 +948,13 @@ function createPluginHost(opts) {
     if (!event) return;
     var slot = findSlot(event.source);
     if (!slot) return;
+    // iframe が別窓に移動・復帰すると再生成され、以前の権限とテーマが失われる。
+    // 移動後の最初の要求に合わせて一度だけ送り直す。
+    if (slot.needsPermission) {
+      slot.needsPermission = false;
+      postPerm(slot);
+      postTheme(slot);
+    }
     var kind = event.data && typeof event.data === 'object' ? event.data.type : '';
     if (kind === 'marust:ui') { handleUi(slot, event.data); return; }
     if (kind === 'marust:relay') { handleRelay(slot, event.data); return; }
@@ -728,7 +1029,9 @@ function createPluginHost(opts) {
       else return;
     }
     slots.forEach(function (slot) {
-      if (slot.disposed) return;
+      // 非アクティブなタブは、表示に不要な通常イベントを受け取らない。
+      // 再表示時は panel-activity 通知を受けて各UIが明示的に更新する。
+      if (slot.disposed || slot.active === false) return;
       var out;
       try {
         out = messages.panelEventMessage(currentSubscribes(slot.pluginId), msg.name, payload);
@@ -759,7 +1062,7 @@ function createPluginHost(opts) {
     if (typeof frame.addEventListener === 'function') {
       frame.addEventListener('load', function () {
         var mine = slots.get(key);
-        if (mine && mine.iframe === frame) { postPerm(mine); postTheme(mine); }
+        if (mine && mine.iframe === frame) { postPerm(mine); postTheme(mine); postActivity(mine); }
       });
     }
     if (typeof options.decorate === 'function' && key === panelId) {
@@ -770,7 +1073,8 @@ function createPluginHost(opts) {
       pluginId: parsed.pluginId,
       name: parsed.name,
       iframe: frame,
-      disposed: false
+      disposed: false,
+      active: true
     };
     var previous = slots.get(key);
     if (previous) dropSlot(key);
@@ -845,6 +1149,9 @@ function createPluginHost(opts) {
         var id = pluginPanelId(row.id, panel.name);
         if (seen[id]) continue;
         seen[id] = true;
+        var menu = panel.menu && typeof panel.menu === 'object' && !Array.isArray(panel.menu) ? plainClone(panel.menu) : null;
+        // hub.getState は秘密欄の規則で menu.key を落とすため、非秘密の transport alias を戻す。
+        if (menu && typeof menu.key !== 'string' && typeof menu.menuKey === 'string') menu.key = menu.menuKey;
         catalog.push({
           id: id,
           pluginId: row.id,
@@ -855,7 +1162,7 @@ function createPluginHost(opts) {
           aliases: Array.isArray(panel.aliases) ? panel.aliases.slice() : [],
           dock: Array.isArray(panel.dock) ? panel.dock.slice() : [],
           dockOrder: typeof panel.dockOrder === 'number' ? panel.dockOrder : 50,
-          menu: panel.menu && typeof panel.menu === 'object' && !Array.isArray(panel.menu) ? plainClone(panel.menu) : null
+          menu: menu
         });
       }
       if (row.mode !== 'legacy') collectUi(row, seen); // 穴・メニュー・小窓・設定は、切のあいだ出さない（外から入れたものも）
@@ -908,10 +1215,10 @@ function createPluginHost(opts) {
       var m = list[i];
       if (!m || typeof m !== 'object' || typeof m.label !== 'string' || !m.label) continue;
       if (typeof m.openPanel === 'string' && validPanelName(m.openPanel)) {
-        menuRows.push({ pluginId: row.id, label: cleanTitle(m.label, row.id), openPanel: m.openPanel });
+        menuRows.push({ pluginId: row.id, label: cleanTitle(m.label, row.id), openPanel: m.openPanel, where: m.where === 'help' ? 'help' : 'tools' });
       } else if (typeof m.method === 'string' && m.method.indexOf('plugin.' + row.id + '.') === 0) {
         // 呼べるのは自分のプラグインの操作だけ（V7-2）
-        menuRows.push({ pluginId: row.id, label: cleanTitle(m.label, row.id), method: m.method });
+        menuRows.push({ pluginId: row.id, label: cleanTitle(m.label, row.id), method: m.method, where: m.where === 'help' ? 'help' : 'tools' });
       }
     }
   }
@@ -982,25 +1289,45 @@ function createPluginHost(opts) {
 
   var pendingPosition = null;
 
+  function ensureAlwaysRenderer(panel) {
+    if (!panel || !panel.api || typeof panel.api.setRenderer !== 'function') return;
+    try {
+      if (panel.api.renderer === 'always') return;
+      panel.api.setRenderer('always');
+    } catch (_) { /* 古いDockviewでは公開APIが無い */ }
+  }
+
   function place(entry) {
     if (!dockview || typeof dockview.addPanel !== 'function' || !entry) return null;
-    if (isOpen(entry.id)) return dockview.getPanel(entry.id);
+    if (isOpen(entry.id)) {
+      var existing = dockview.getPanel(entry.id);
+      ensureAlwaysRenderer(existing);
+      syncActivity(existing);
+      return existing;
+    }
     var opt = {
       id: entry.id,
       component: entry.id,
       title: entry.title,
       params: { pluginId: entry.pluginId, name: entry.name, file: entry.file }
     };
+    opt.renderer = 'always';
     if (entry.kind === 'popup') opt.floating = true;
     else if (pendingPosition) opt.position = pendingPosition;
     else if (isOpen('plugins')) opt.position = { referencePanel: 'plugins', direction: 'within' };
     try {
-      return dockview.addPanel(opt);
+      var added = dockview.addPanel(opt);
+      ensureAlwaysRenderer(added);
+      syncActivity(added);
+      return added;
     } catch (_) {
       try {
         delete opt.position;
         delete opt.floating;
-        return dockview.addPanel(opt);
+        var fallback = dockview.addPanel(opt);
+        ensureAlwaysRenderer(fallback);
+        syncActivity(fallback);
+        return fallback;
       } catch (err) {
         return null;
       }
@@ -1045,20 +1372,60 @@ function createPluginHost(opts) {
   }
 
   installCreateComponent(dockview, createPluginView);
-  if (win && typeof win.addEventListener === 'function') win.addEventListener('message', handleMessage);
+  function attachMessageWindow(target) {
+    if (!target || typeof target.addEventListener !== 'function') return false;
+    if (messageWindows.indexOf(target) !== -1) return true;
+    target.addEventListener('message', handleMessage);
+    messageWindows.push(target);
+    if (target !== win) slots.forEach(function (slot) { slot.needsPermission = true; });
+    return true;
+  }
+
+  function detachMessageWindow(target) {
+    var index = messageWindows.indexOf(target);
+    if (index < 0) return false;
+    try { target.removeEventListener('message', handleMessage); } catch (_) { /* closed popout */ }
+    messageWindows.splice(index, 1);
+    slots.forEach(function (slot) { slot.needsPermission = true; });
+    return true;
+  }
+
+  attachMessageWindow(win);
   if (api && typeof api.subscribe === 'function') {
     try { unsub = api.subscribe(onBus); } catch (_) { unsub = null; }
   }
   if (dockview && typeof dockview.onDidRemovePanel === 'function') {
-    try {
-      dockview.onDidRemovePanel(function (ev) {
-        var id = '';
-        if (ev && typeof ev.id === 'string') id = ev.id;
-        else if (ev && ev.panel && typeof ev.panel.id === 'string') id = ev.panel.id;
-        if (parsePluginPanelId(id)) dropSlot(id);
-      });
-    } catch (_) { /* ドックがイベントを持たない */ }
+    listenEvent(dockview, 'onDidRemovePanel', function (ev) {
+      var id = '';
+      if (ev && typeof ev.id === 'string') id = ev.id;
+      else if (ev && ev.panel && typeof ev.panel.id === 'string') id = ev.panel.id;
+      if (parsePluginPanelId(id)) dropSlot(id);
+      syncActivity();
+    });
   }
+  listenEvent(dockview, 'onDidAddPanel', function (ev) {
+    var panel = ev && ev.panel ? ev.panel : ev;
+    if (parsePluginPanelId(activePanelId(panel))) ensureAlwaysRenderer(panel);
+    attachActivityGroup(panelGroup(panel));
+    syncActivity(panel);
+  });
+  listenEvent(dockview, 'onDidAddGroup', function (ev) {
+    var group = ev && ev.group ? ev.group : ev;
+    attachActivityGroup(group);
+    syncActivity();
+  });
+  listenEvent(dockview, 'onDidRemoveGroup', function (ev) {
+    var group = ev && ev.group ? ev.group : ev;
+    disposeActivityGroup(group);
+    syncActivity();
+  });
+  listenEvent(dockview, 'onDidLayoutFromJSON', function () { syncActivity(); });
+  listenEvent(dockview, 'onDidActivePanelChange', function (ev) {
+    var panel = ev && ev.panel ? ev.panel : ev;
+    syncActivity(panel);
+  });
+  dockGroups().forEach(attachActivityGroup);
+  syncActivity();
 
   var ready = Promise.all([pull(), loadDescribed()]).then(function () {});
 
@@ -1110,8 +1477,20 @@ function createPluginHost(opts) {
     },
     openAll: function () { return ready.then(function () { return openAll(); }); },
     close: close,
+    attachWindow: attachMessageWindow,
+    detachWindow: detachMessageWindow,
     dispose: function () {
-      if (win && typeof win.removeEventListener === 'function') win.removeEventListener('message', handleMessage);
+      if (hostDisposed) return;
+      hostDisposed = true;
+      messageWindows.slice().forEach(detachMessageWindow);
+      ownedDisposers.slice().reverse().forEach(function (dispose) {
+        try { dispose(); } catch (_) { /* 既に閉じた窓・ドック */ }
+      });
+      ownedDisposers = [];
+      activityGroups = [];
+      activityOwners = [];
+      activityGroupRecords = [];
+      activityOwnerRecords = [];
       if (typeof unsub === 'function') {
         try { unsub(); } catch (_) { /* 購読解除 */ }
       }

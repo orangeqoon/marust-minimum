@@ -47,6 +47,7 @@ const YT_LIST_ACTIVE = 'https://youtube.googleapis.com/youtube/v3/liveBroadcasts
 const YT_LIST_UPCOMING = 'https://youtube.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&broadcastStatus=upcoming&broadcastType=all&maxResults=5';
 const YT_LIST_MINE = 'https://youtube.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&mine=true&maxResults=5';
 const YT_UPDATE = 'https://youtube.googleapis.com/youtube/v3/liveBroadcasts?part=snippet';
+const YT_GET_BY_ID = 'https://youtube.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&id=bc-1';
 const YT_TOKEN = 'https://oauth2.googleapis.com/token';
 const TW_USERS = 'https://api.twitch.tv/helix/users';
 const TW_TOKEN = 'https://id.twitch.tv/oauth2/token';
@@ -265,12 +266,13 @@ async function main() {
         if (url === YT_LIST_ACTIVE) return jsonResponse(200, { items: [] });
         if (url === YT_LIST_UPCOMING) return jsonResponse(200, { items: [broadcast('待機')] });
         if (url === YT_UPDATE) return jsonResponse(200, { id: 'bc-1' });
+        if (url === YT_GET_BY_ID) return jsonResponse(200, { items: [broadcast('新しい題名')] });
         throw new Error('unexpected ' + url + ' ' + (init && init.method));
       }
     });
     const result = await bag.plugin.updateMetadata({ title: '新しい題名', category: 'Games' }, {});
-    assert.deepStrictEqual(result, { ok: true });
-    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_LIST_ACTIVE, YT_LIST_UPCOMING, YT_UPDATE]);
+    assert.deepStrictEqual(result, { ok: true, verified: true });
+    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_LIST_ACTIVE, YT_LIST_UPCOMING, YT_UPDATE, YT_GET_BY_ID]);
     assert.strictEqual(methodOf(bag.calls[2]), 'PUT');
     assert.strictEqual(header(bag.calls[2], 'Authorization'), 'Bearer ' + YT.access);
     assert.strictEqual(header(bag.calls[2], 'Content-Type'), 'application/json');
@@ -292,12 +294,13 @@ async function main() {
       fetch: async function fetch(url) {
         if (url === YT_LIST_ACTIVE) return jsonResponse(200, { items: [broadcast('配信中')] });
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) return jsonResponse(200, { items: [broadcast('新しい題名')] });
         throw new Error('unexpected ' + url);
       }
     });
     const result = await bag.plugin.updateMetadata({ title: '新しい題名' }, {});
-    assert.deepStrictEqual(result, { ok: true });
-    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_LIST_ACTIVE, YT_UPDATE]);
+    assert.deepStrictEqual(result, { ok: true, verified: true });
+    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_LIST_ACTIVE, YT_UPDATE, YT_GET_BY_ID]);
     bag.plugin.destroy();
   });
 
@@ -307,12 +310,13 @@ async function main() {
         if (url === YT_LIST_ACTIVE || url === YT_LIST_UPCOMING) return jsonResponse(200, { items: [] });
         if (url === YT_LIST_MINE) return jsonResponse(200, { items: [broadcast('手元')] });
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) return jsonResponse(200, { items: [broadcast('新しい題名')] });
         throw new Error('unexpected ' + url);
       }
     });
     const result = await bag.plugin.updateMetadata({ title: '新しい題名' }, {});
-    assert.deepStrictEqual(result, { ok: true });
-    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_LIST_ACTIVE, YT_LIST_UPCOMING, YT_LIST_MINE, YT_UPDATE]);
+    assert.deepStrictEqual(result, { ok: true, verified: true });
+    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_LIST_ACTIVE, YT_LIST_UPCOMING, YT_LIST_MINE, YT_UPDATE, YT_GET_BY_ID]);
     bag.plugin.destroy();
   });
 
@@ -327,11 +331,12 @@ async function main() {
           return jsonResponse(200, { items: [broadcast()] });
         }
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) return jsonResponse(200, { items: [broadcast('新しい題名')] });
         throw new Error('unexpected ' + url);
       }
     });
     const result = await bag.plugin.updateMetadata({ title: '新しい題名' }, {});
-    assert.deepStrictEqual(result, { ok: true });
+    assert.deepStrictEqual(result, { ok: true, verified: true });
     assert.strictEqual(bag.calls.filter((call) => call.url === YT_TOKEN).length, 1);
     assert.strictEqual(bag.calls.filter((call) => call.url === YT_LIST_ACTIVE).length, 2);
     assert.strictEqual(header(bag.calls[0], 'Authorization'), 'Bearer ' + YT.access);
@@ -368,12 +373,13 @@ async function main() {
         if (url === YT_TOKEN) return tokenResponse(YT.access2);
         if (url === YT_LIST_ACTIVE) return jsonResponse(200, { items: [broadcast()] });
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) return jsonResponse(200, { items: [broadcast('新しい題名')] });
         throw new Error('unexpected ' + url);
       }
     });
     const result = await bag.plugin.updateMetadata({ title: '新しい題名' }, {});
-    assert.deepStrictEqual(result, { ok: true });
-    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_TOKEN, YT_LIST_ACTIVE, YT_UPDATE]);
+    assert.deepStrictEqual(result, { ok: true, verified: true });
+    assert.deepStrictEqual(bag.calls.map((call) => call.url), [YT_TOKEN, YT_LIST_ACTIVE, YT_UPDATE, YT_GET_BY_ID]);
     assert.strictEqual(header(bag.calls[1], 'Authorization'), 'Bearer ' + YT.access2);
     assert.strictEqual(header(bag.calls[2], 'Authorization'), 'Bearer ' + YT.access2);
     bag.plugin.destroy();
@@ -394,14 +400,19 @@ async function main() {
           return jsonResponse(200, { items: [broadcast()] });
         }
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) {
+          const lastPut = bag.calls.filter(function (c) { return c.url === YT_UPDATE; }).pop();
+          const putTitle = lastPut ? jsonBody(lastPut).snippet.title : '';
+          return jsonResponse(200, { items: [broadcast(putTitle)] });
+        }
         throw new Error('unexpected ' + url);
       }
     });
     const first = await bag.plugin.updateMetadata({ title: '1' }, {});
-    assert.deepStrictEqual(first, { ok: true });
+    assert.deepStrictEqual(first, { ok: true, verified: true });
     const mark = bag.calls.length;
     const second = await bag.plugin.updateMetadata({ title: '2' }, {});
-    assert.deepStrictEqual(second, { ok: true });
+    assert.deepStrictEqual(second, { ok: true, verified: true });
     const again = bag.calls.slice(mark);
     const tokenCall = again.filter(function (call) { return call.url === YT_TOKEN; });
     assert.strictEqual(tokenCall.length, 1);
@@ -443,6 +454,32 @@ async function main() {
     assert.strictEqual(bag.gets.length, 0);
     assert.deepStrictEqual(await bag.plugin.getStatus(), {});
     bag.plugin.destroy();
+  });
+
+  await test('youtube checks the saved title after update', async () => {
+    async function run(observed, expected) {
+      const bag = bootYouTube({
+        fetch: async function fetch(url) {
+          if (url === YT_LIST_ACTIVE) return jsonResponse(200, { items: [broadcast('配信中')] });
+          if (url === YT_UPDATE) return jsonResponse(200, {});
+          if (url === YT_GET_BY_ID) {
+            if (observed === null) return jsonResponse(200, { items: [] });
+            if (observed === 'boom') throw new Error('read failed');
+            if (observed === 'http500') return jsonResponse(500, {});
+            return jsonResponse(200, { items: [broadcast(observed)] });
+          }
+          throw new Error('unexpected ' + url);
+        }
+      });
+      const r = await bag.plugin.updateMetadata({ title: '新しい題名' }, {});
+      assert.deepStrictEqual(r, expected);
+      bag.plugin.destroy();
+    }
+    await run('新しい題名', { ok: true, verified: true });
+    await run('別の題名', { ok: false, error: 'title-not-reflected' });
+    await run(null, { ok: true, verified: false });
+    await run('boom', { ok: true, verified: false });
+    await run('http500', { ok: true, verified: false });
   });
 
   await test('youtube does not follow a redirect', async () => {
@@ -515,6 +552,11 @@ async function main() {
         if (url === YT_TOKEN) return tokenResponse(YT.access2);
         if (url === YT_LIST_ACTIVE) return jsonResponse(200, { items: [broadcast()] });
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) {
+          const lastPut = bag.calls.filter(function (c) { return c.url === YT_UPDATE; }).pop();
+          const putTitle = lastPut ? jsonBody(lastPut).snippet.title : '1';
+          return jsonResponse(200, { items: [broadcast(putTitle)] });
+        }
         throw new Error('unexpected ' + url);
       }
     });
@@ -745,7 +787,7 @@ async function main() {
       }
     });
     const result = await bag.plugin.updateMetadata({ title: '番組', category: 'just chatting' }, {});
-    assert.deepStrictEqual(result, { ok: true });
+    assert.deepStrictEqual(result, { ok: true, verified: false, reason: 'not-verified' });
     assert.strictEqual(methodOf(bag.calls[0]), 'GET');
     const patch = bag.calls[1];
     assert.strictEqual(patch.url, KK_CHANNELS);
@@ -780,19 +822,45 @@ async function main() {
       }
     });
     const result = await empty.plugin.updateMetadata({ title: '   ', category: 'Nope' }, {});
-    assert.deepStrictEqual(result, { ok: true });
+    assert.deepStrictEqual(result, { ok: false, error: 'category-not-found' });
     assert.strictEqual(empty.calls.length, 1);
     empty.plugin.destroy();
+  });
+
+  await test('kick checks the saved title after update', async () => {
+    for (const [current, expected] of [['新しい題名', true], ['古い題名', false]]) {
+      const bag = bootKick({ fetch: async function (url, init) {
+        if (url === KK_CHANNELS && init.method === 'PATCH') return jsonResponse(204, '');
+        if (url === KK_CHANNELS && init.method === 'GET') return jsonResponse(200, { data: [{ stream_title: current }] });
+        throw new Error('unexpected');
+      } });
+      const r = await bag.plugin.updateMetadata({ title: '新しい題名' }, {});
+      assert.deepStrictEqual(r, expected ? { ok: true, verified: true } : { ok: false, error: 'title-not-reflected' });
+      bag.plugin.destroy();
+    }
+  });
+
+  await test('kick reports category rejection when title-only fallback succeeds', async () => {
+    let patches = 0;
+    const bag = bootKick({ fetch: async function (url) {
+      if (url.indexOf('/public/v1/categories') !== -1) return jsonResponse(200, { data: [{ id: 101, name: 'Game' }] });
+      if (url === KK_CHANNELS) return jsonResponse(++patches === 1 ? 400 : 204, {});
+      throw new Error('unexpected');
+    } });
+    assert.deepStrictEqual(await bag.plugin.updateMetadata({ title: '番組', category: 'Game' }, {}), { ok: true, verified: false, reason: 'category-not-updated' });
+    assert.strictEqual(patches, 2);
+    bag.plugin.destroy();
   });
 
   await test('kick refreshes once when the patch returns 401', async () => {
     let patches = 0;
     const bag = bootKick({
-      fetch: async function fetch(url) {
+      fetch: async function fetch(url, init) {
         if (url === KK_TOKEN) return tokenResponse(KK.access2);
         if (url.indexOf('/public/v1/categories') !== -1) {
           return jsonResponse(200, { data: [{ id: 101, name: 'Just Chatting' }] });
         }
+        if (url === KK_CHANNELS && init.method === 'GET') return jsonResponse(204, '');
         if (url === KK_CHANNELS) {
           patches += 1;
           if (patches === 1) return jsonResponse(401, { message: KK.access });
@@ -802,7 +870,7 @@ async function main() {
       }
     });
     const result = await bag.plugin.updateMetadata({ title: '番組', category: 'Just Chatting' }, {});
-    assert.deepStrictEqual(result, { ok: true });
+    assert.deepStrictEqual(result, { ok: true, verified: false, reason: 'not-verified' });
     assert.strictEqual(patches, 2);
     assert.strictEqual(bag.calls.filter((call) => call.url === KK_TOKEN).length, 1);
     assert.strictEqual(bag.calls.filter((call) => call.url.indexOf('/categories') !== -1).length, 1);
@@ -912,10 +980,11 @@ async function main() {
           return jsonResponse(200, { items: [broadcast()] });
         }
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) return jsonResponse(200, { items: [broadcast('新しい題名')] });
         throw new Error('unexpected ' + url);
       }
     });
-    assert.deepStrictEqual(await yt.plugin.updateMetadata({ title: '新しい題名' }, {}), { ok: true });
+    assert.deepStrictEqual(await yt.plugin.updateMetadata({ title: '新しい題名' }, {}), { ok: true, verified: true });
     assert.strictEqual(yt.sets.length, 1);
     assert.strictEqual(yt.sets[0].name, 'youtube.oauth');
     assert.deepStrictEqual(JSON.parse(yt.sets[0].value), {
@@ -972,7 +1041,7 @@ async function main() {
         throw new Error('unexpected ' + url);
       }
     });
-    assert.deepStrictEqual(await kk.plugin.updateMetadata({ title: '番組', category: 'Just Chatting' }, {}), { ok: true });
+    assert.deepStrictEqual(await kk.plugin.updateMetadata({ title: '番組', category: 'Just Chatting' }, {}), { ok: true, verified: false, reason: 'not-verified' });
     assert.strictEqual(kk.sets.length, 1);
     assert.strictEqual(kk.sets[0].name, 'kick.oauth');
     assert.deepStrictEqual(JSON.parse(kk.sets[0].value), {
@@ -1004,10 +1073,11 @@ async function main() {
         if (url === YT_TOKEN) return tokenResponse(YT.access2);
         if (url === YT_LIST_ACTIVE) return jsonResponse(200, { items: [broadcast()] });
         if (url === YT_UPDATE) return jsonResponse(200, {});
+        if (url === YT_GET_BY_ID) return jsonResponse(200, { items: [broadcast('新しい題名')] });
         throw new Error('unexpected ' + url);
       }
     });
-    assert.deepStrictEqual(await thrown.plugin.updateMetadata({ title: '新しい題名' }, {}), { ok: true });
+    assert.deepStrictEqual(await thrown.plugin.updateMetadata({ title: '新しい題名' }, {}), { ok: true, verified: true });
     assert.strictEqual(thrown.sets.length, 1);
     assertClean(thrown.logs.join('\n'), [YT.access2, YT.secret, YT.refresh]);
     thrown.plugin.destroy();

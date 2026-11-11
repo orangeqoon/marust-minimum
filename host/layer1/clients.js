@@ -62,8 +62,9 @@ function createClients(options) {
     }
   }
 
-  function save(rows) {
+  function save(rows, quiet) {
     writeJson(file, { clients: rows });
+    if (!quiet && typeof opts.onChanged === 'function') { try { opts.onChanged(); } catch (_) {} }
   }
 
   function kindOf(row) {
@@ -169,7 +170,7 @@ function createClients(options) {
     const written = seenWrittenAt.get(row.id);
     if (written == null || nowMs - written >= SEEN_WRITE_MS) {
       row.lastSeenAt = nowIso;
-      save(rows);
+      save(rows, true);
       seenWrittenAt.set(row.id, nowMs);
     }
     return publicView(row);

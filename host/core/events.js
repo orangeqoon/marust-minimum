@@ -24,6 +24,8 @@ const EVENTS = Object.freeze({
   AUTH_UPDATED: 'auth.updated',
   VIEWER_COUNT: 'viewer.count',
   APPROVAL_RESOLVED: 'approval.resolved',
+  APPROVAL_REQUESTED: 'approval.requested',
+  CLIENTS_CHANGED: 'clients.changed',
   BROADCAST_STARTED: 'broadcast.started',
   BROADCAST_RESULT: 'broadcast.result',
   BROADCAST_STOPPED: 'broadcast.stopped',
@@ -36,6 +38,7 @@ const EVENTS = Object.freeze({
   SITE_TROUBLE: 'site.trouble',
   SLOT_SWITCHING: 'slot.switching',
   PLUGIN_RELOADED: 'plugin.reloaded',
+  PLUGIN_DATA_CHANGED: 'plugin.dataChanged',
   UI_RELOAD_REQUESTED: 'ui.reloadRequested',
   UI_THEME_CHANGED: 'ui.themeChanged',
   UI_SHELL_CHANGED: 'ui.shellChanged'

@@ -14,6 +14,7 @@ const { safeSecretError } = require('../../core');
 const { checkPluginMethod } = require('../plugin-api-check');
 const { subscribeCovered, sanitizeOverlayValues, normalizePanels } = require('../plugin-surface');
 const { gateCtx, strictNeeds } = require('./ctx-ports');
+const { createOperationCoordinator } = require('../operation-coordinator');
 
 function loadPluginLayers() {
   try {
@@ -60,6 +61,7 @@ function validSiteTrouble(payload) {
 }
 
 function createContext(S) {
+  const operations = createOperationCoordinator();
   const { opts, core, records, byId, events, overlayHub, secretProvider, modeFor, sessionsNow, appInfo, openExternalImpl, keysPort, chatNow, obsRead, obsControl, log, boxLog, recLog, inactiveSession, ensureDataDir, dataDirName, manifestCopy, isController, isChatSource, st } = S;
   const register = (...args) => S.fn.register(...args);
   const registerActions = (...args) => S.fn.registerActions(...args);
@@ -140,8 +142,9 @@ function createContext(S) {
   // 配信全体の開始・停止。needs に obs.streamControl があり、obsControl が渡っているときだけ。
   // obs.read は要らない。base が無いときは streamControl だけを渡す。
   // さらにそのプラグイン自身が live のときだけ通す（shadow・legacy は止める・始めるをしない）。
-  function makeObsStreamControl(rec, base, modeOf) {
+  function makeObsStreamControl(rec, base, modeOf, isCurrent) {
     async function streamControl(input) {
+      if (!isCurrent()) return { ok: false, error: 'plugin-stopped' };
       const action = input && input.action;
       // 'check' は OBS を動かさず、今この口が使えるか（プラグインが live で、画面の OBS 操作がオンか）だけを確かめる。
       if (action !== 'start' && action !== 'stop' && action !== 'check') return { ok: false, error: 'bad-action' };
@@ -168,6 +171,10 @@ function createContext(S) {
   function makeCtx(rec) {
     if (rec.ctx) return rec.ctx;
     const generation = {};
+    if (rec.ctxOperationLease) rec.ctxOperationLease.retire();
+    const operationLease = operations.createLease(rec.id);
+    rec.ctxOperationLease = operationLease;
+    const isCurrent = () => rec.ctxGeneration === generation && operationLease.isCurrent();
     const manifest = manifestCopy(rec.manifest);
     let dataDirPath = '';
     const subscribes = Array.isArray(manifest.subscribes) ? manifest.subscribes : [];
@@ -413,11 +420,49 @@ function createContext(S) {
     };
     // 読む口は obs.read と obsRead、開始・停止は obs.streamControl と obsControl。片方だけでも渡す。
     const obsNeeds = Array.isArray(manifest.needs) ? manifest.needs : [];
+    if (obsNeeds.indexOf('operations.exclusive') !== -1) {
+      ctx.operations = Object.freeze({ run: operationLease.run });
+    }
     const wantObsRead = !!(obsRead && obsNeeds.indexOf('obs.read') !== -1);
     const wantObsControl = !!(obsControl && obsNeeds.indexOf('obs.streamControl') !== -1);
     if (wantObsRead || wantObsControl) {
       const read = wantObsRead ? makeObsRead() : null;
-      ctx.obs = wantObsControl ? makeObsStreamControl(rec, read, () => ctx.mode()) : read;
+      ctx.obs = wantObsControl ? makeObsStreamControl(rec, read, () => ctx.mode(), isCurrent) : read;
+    }
+    if (obsNeeds.indexOf('obs.outputControl') !== -1) {
+      const invoke = async (method, params, requestGuard) => {
+        if (!isCurrent()) return { ok: false, error: 'plugin-stopped' };
+        if (!params || typeof params !== 'object' || Array.isArray(params)) return { ok: false, error: 'invalid-params' };
+        const requestCurrent = () => { try { return requestGuard == null || (typeof requestGuard === 'function' && requestGuard() === true); } catch (_) { return false; } };
+        const guard = () => isCurrent() && requestCurrent() && !!params && typeof params === 'object' && !Array.isArray(params)
+          && (method === 'check' || params.action === 'status'
+            || (['start', 'stop'].indexOf(params.action) !== -1 && ctx.mode() === 'live'
+              && (params.action !== 'start' || (canStartBroadcast(rec) && !isStoppingNow()))));
+        if (method === 'control' && (!params || params.action !== 'status')) {
+          if (ctx.mode() !== 'live') return { ok: false, error: 'not-live' };
+          if (params && params.action === 'start') {
+            if (isStoppingNow()) return { ok: false, error: 'stopping' };
+            if (!canStartBroadcast(rec)) return { ok: false, error: 'layer3-no-start' };
+          }
+        }
+        try {
+          const port = typeof opts.outputControl === 'function' ? opts.outputControl() : null;
+          if (!port || typeof port[method] !== 'function') return { ok: false, error: 'unavailable' };
+          const result = await port[method](params, guard);
+          if (!result || typeof result !== 'object') return { ok: false, error: 'unavailable' };
+          const safe = { ok: result.ok === true };
+          if (result.error) safe.error = typeof result.error === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(result.error) ? result.error : 'failed';
+          // Return only the public output proof/status fields; expected service
+          // credentials remain inside this request and the host's private port.
+          for (const key of ['match', 'kind', 'destinationId', 'engineId', 'targetId', 'state', 'proofId']) {
+            if (typeof result[key] === 'string') safe[key] = result[key];
+          }
+          if (typeof result.streaming === 'boolean') safe.streaming = result.streaming;
+          if (typeof result.humanStopped === 'boolean') safe.humanStopped = result.humanStopped;
+          return safe;
+        } catch (_) { return { ok: false, error: 'failed' }; }
+      };
+      ctx.outputs = Object.freeze({ check: (params, guard) => invoke('check', params, guard), control: (params, guard) => invoke('control', params, guard) });
     }
     // api.namespaces か api.calls を宣言したプラグインに ctx.api を渡す（V1・V2-1。L8d で出どころ制限解除）。登録は load〜start の間だけ。表に入るのは running になったとき（registerActions）。
     if (apiDecl) {
@@ -425,13 +470,13 @@ function createContext(S) {
         // 本体の API を呼ぶ（V2-1）。manifest の api.calls に書いた名前だけ。権限・検査・開発者モードの門・監査は本体の dispatch のまま
         call(method, params) {
           if (apiCalls.indexOf(method) === -1) return Promise.resolve({ ok: false, error: 'not-declared' });
-          if (rec.ctxGeneration !== generation || rec.ctx == null || !rec.instance) return Promise.resolve({ ok: false, error: 'plugin-stopped' });
+          if (!isCurrent() || rec.ctx == null || !rec.instance) return Promise.resolve({ ok: false, error: 'plugin-stopped' });
           if (isStartBroadcastCall(method, params)) {
             if (isStoppingNow()) return Promise.resolve({ ok: false, error: 'stopping' });
             if (!canStartBroadcast(rec)) return Promise.resolve({ ok: false, error: 'layer3-no-start' });
           }
           if (!st.apiBind || typeof st.apiBind.callAs !== 'function') return Promise.resolve({ ok: false, error: 'unavailable' });
-          return Promise.resolve(st.apiBind.callAs(rec.id, method, params, { titleReserved: reservedHolder() === rec.id })).catch(() => ({ ok: false, error: 'failed' }));
+          return Promise.resolve(st.apiBind.callAs(rec.id, method, params, { titleReserved: canUseReservedTitle(rec) })).catch(() => ({ ok: false, error: 'failed' }));
         },
         register(method, handler, options) {
           if (!rec.apiOpen) return { ok: false, error: 'register-closed' };
@@ -529,14 +574,16 @@ function createContext(S) {
   }
 
   // 出どころで渡す力を変える作り（Q14）はやめ、宣言した口は出どころに関係なく渡す（L8d）。
-  // ただしひとつしか持てない口（keys・title.reserved）の持ち主はセットだけ（計画 C・C2-2）。
+  // keys はセットの最初の一つ。予約送信は出どころに関係なく宣言したプラグインに許可する。
   function coreBuiltin(rec) { return !!rec; }
   function builtinHolder(need) {
     const predicate = (r) => r.source === 'set' && byId.get(r.id) === r && r.manifest && Array.isArray(r.manifest.needs) && r.manifest.needs.indexOf(need) !== -1;
     const holder = records.find(predicate);
     return holder ? holder.id : '';
   }
-  function reservedHolder() { return builtinHolder('title.reserved'); }
+  function canUseReservedTitle(rec) {
+    return byId.get(rec.id) === rec && rec.manifest && Array.isArray(rec.manifest.needs) && rec.manifest.needs.indexOf('title.reserved') !== -1;
+  }
 
   return {
     makeCtx

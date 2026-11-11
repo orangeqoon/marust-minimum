@@ -9,6 +9,7 @@ function initPluginManager() {
   if (!root || root.dataset.bound === '1') return;
   root.dataset.bound = '1';
   var hint = root.querySelector('#plugin-manager-hint');
+  var reloadBox = root.querySelector('#plugin-manager-reload');
   var box = root.querySelector('#plugin-manager-list');
   var note = root.querySelector('#plugin-manager-status');
   var busy = false;
@@ -46,6 +47,34 @@ function initPluginManager() {
       refresh();
       if (typeof refreshPluginCatalog === 'function') refreshPluginCatalog();
     }).catch(function () { busy = false; say(STR.pluginManagerFailed); refresh(); });
+  }
+  function reloadAll() {
+    if (busy) return;
+    busy = true;
+    say('');
+    call('plugins.reloadAll', {}).then(function (r) {
+      busy = false;
+      if (!r || r.ok !== true) {
+        say(r && r.error === 'busy' ? STR.pluginManagerFailed : STR.pluginManagerFailed);
+        refresh();
+        return;
+      }
+      var rows = Array.isArray(r.results) ? r.results : [];
+      var skipped = rows.filter(function (row) { return row && row.result === 'skip'; }).length;
+      var failed = rows.filter(function (row) { return row && row.result === 'error'; }).length;
+      say(STR.pluginManagerReloadDone(rows.length - skipped, skipped, failed));
+      refresh();
+      if (typeof refreshPluginCatalog === 'function') refreshPluginCatalog();
+    }).catch(function () { busy = false; say(STR.pluginManagerFailed); refresh(); });
+  }
+  function paintReload() {
+    if (!reloadBox) return;
+    while (reloadBox.firstChild) reloadBox.removeChild(reloadBox.firstChild);
+    var bar = mk('div', 'feature-row', null, { 'data-plugin-reload': 'all' });
+    var buttonEl = button(STR.pluginManagerReloadAll, reloadAll, busy);
+    bar.appendChild(buttonEl);
+    bar.appendChild(mk('span', 'timer-hint feature-hint', STR.pluginManagerReloadHint));
+    reloadBox.appendChild(bar);
   }
   function setMode(p, mode) {
     // 外から入れたものは、試すだけにするときも live のときも、必ず本人が id を入力する（サーバーも求める）
@@ -217,6 +246,7 @@ function initPluginManager() {
   }
   function refresh() {
     if (busy) return Promise.resolve();
+    paintReload();
     return Promise.all([call('plugins.list', {}), call('plugin.list', {}).catch(function () { return null; })]).then(function (res) {
       var r = res[0];
       var inst = res[1];
@@ -227,13 +257,14 @@ function initPluginManager() {
         streaming = r.streaming === true;
         if (was !== streaming || !installBox.firstChild) paintInstall(shownInfo);
         if (was !== streaming || !makeBox.firstChild) paintMake();
+        paintReload();
         paint(r.plugins);
       } else say(STR.pluginManagerFailed);
     }).catch(function () { say(STR.pluginManagerFailed); });
   }
   function visible() { return root.offsetParent !== null; }
   refresh();
-  setInterval(function () { if (visible()) refresh(); }, 15000);
+  setInterval(function () { if (visible() && !document.hidden) refresh(); }, 15000);
   if (hubApi() && hubApi().subscribe) hubApi().subscribe(function (msg) { if (msg && msg.name === 'modes.changed' && visible()) refresh(); });
 }
 

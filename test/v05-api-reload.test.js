@@ -93,14 +93,19 @@ const noLeak = (value, root) => !JSON.stringify(value).toLowerCase().includes(ro
     } finally { t.done(); }
   });
 
-  await test('開発者モードでないと reload 系は dev-only（logs / status は読めてよい）', async () => {
+  await test('開発者モードでなくてもローカル窓の reloadAll は使えるが、native と read-only は拒む', async () => {
     const t = setup({ devMode: false });
     try {
       t.put(t.builtin, 'demo');
       await t.registry.loadAll();
-      for (const [m, p] of [['plugin.reload', { id: 'demo' }], ['plugins.reloadAll', {}], ['ui.reload', { target: 'all' }], ['app.restart', {}]]) {
+      for (const [m, p] of [['plugin.reload', { id: 'demo' }], ['ui.reload', { target: 'all' }], ['app.restart', {}]]) {
         assert.strictEqual((await t.api.call(m, p, t.win)).error, 'dev-only', m);
       }
+      const local = await t.api.call('plugins.reloadAll', {}, t.win);
+      assert.strictEqual(local.ok, true, JSON.stringify(local));
+      assert.strictEqual((await t.api.call('plugins.reloadAll', {}, t.mcpCtx)).error, 'dev-only');
+      const readOnly = { clientId: WINDOW_ID, kind: 'window', permissions: ['read'] };
+      assert.strictEqual((await t.api.call('plugins.reloadAll', {}, readOnly)).error, 'forbidden');
       assert.strictEqual((await t.api.call('plugin.status', { id: 'demo' }, t.win)).ok, true);
     } finally { t.done(); }
   });

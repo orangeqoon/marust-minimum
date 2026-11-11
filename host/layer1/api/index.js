@@ -79,7 +79,7 @@ function plainCtx(ctx, granted) {
     clientId: ctx && typeof ctx.clientId === 'string' ? ctx.clientId : '',
     kind: ctx && typeof ctx.kind === 'string' ? ctx.kind : '',
     requiresApproval: !!(ctx && ctx.requiresApproval),
-    // 予約の自動送信（hub.fanoutReserved）を呼んでよいと本体の登録簿が認めた内蔵プラグインの呼び出しだけ true（外の端末は付けられない）
+    // 予約の自動送信（hub.fanoutReserved）を呼んでよいと本体の登録簿が認めたプラグインの呼び出しだけ true（外の端末は付けられない）
     titleReserved: !!(ctx && ctx.kind === 'plugin' && ctx.titleReserved === true)
   };
 }
@@ -1219,6 +1219,8 @@ function createApi(deps) {
     const row = table[name];
     if (!row || rowHidden(row)) return { ok: false, error: 'unknown-method' };
     const granted = ctx && Array.isArray(ctx.permissions) ? ctx.permissions : IPC_PERMISSIONS.slice();
+    const perf = src.performanceMetrics;
+    const perfToken = perf && typeof perf.begin === 'function' ? perf.begin(name) : null;
     let result;
     try {
       result = await dispatch(name, row, params, ctx, granted);
@@ -1226,6 +1228,8 @@ function createApi(deps) {
       result = { ok: false, error: 'failed' };
     }
     record(name, row, params, ctx, result);
+    if (result && result.pending === true && src.bus) src.bus.publish('approval.requested', {}, { source: '#core' });
+    if (perfToken && typeof perf.end === 'function') perf.end(perfToken);
     return result;
   }
 

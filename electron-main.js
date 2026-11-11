@@ -13,11 +13,15 @@
 
 const fs = require('fs');
 const path = require('path');
-const { app, BrowserWindow, session, globalShortcut, Tray, Menu, nativeImage, dialog, shell } = require('electron');
+const { app, BrowserWindow, session, globalShortcut, Tray, Menu, nativeImage, dialog, shell, ipcMain } = require('electron');
+const { configureElectronIdentity } = require('./host/core/electron-identity');
+// safeStorage を使う前、かつ app.whenReady() より前に配布版と同じアプリ名へ揃える。
+configureElectronIdentity({ app });
 const { createCore } = require('./host/core');
 const { createLogRetention } = require('./host/layer1/log-retention');
 const { createRegistry } = require('./host/layer1/plugin-registry');
 const { createObsStreamControl } = require('./host/core');
+const { createObsOutputControl } = require('./host/core/engine/obs-output-control');
 const { createOrchestrator, createPeersBridge, formatModeSummary, hubFanoutDecision, allowedLiveIdsForHub } = require('./host/layer1/orchestrator');
 const { createEventBus } = require('./host/core');
 const { createStateStore } = require('./host/core');
@@ -59,6 +63,7 @@ const { createChatPort } = require('./host/layer1/chat-port');
 const { createHomeState } = require('./host/layer1/home-state');
 const { createObservedBridge } = require('./host/core');
 const { run } = require('./host/core');
+const { createPerformanceMetrics } = require('./lib/performance-metrics');
 
 const INITIAL_SYNC_MS = 10000;
 
@@ -96,7 +101,28 @@ function currentTier() {
 
 let hubState = null;
 let mainWindow = null;
+const popoutWindows = new Set();
+ipcMain.handle('marust:popout-toggle', (event, action) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || !popoutWindows.has(win) || event.senderFrame !== event.sender.mainFrame) return { ok: false };
+  if (action === 'state') return { ok: true, pin: win.isAlwaysOnTop(), ghost: win.getOpacity() < 0.95 };
+  if (action === 'pin') {
+    const enabled = !win.isAlwaysOnTop();
+    win.setAlwaysOnTop(enabled);
+    return { ok: true, enabled };
+  }
+  if (action === 'ghost') {
+    const enabled = win.getOpacity() > 0.95;
+    win.setOpacity(enabled ? 0.65 : 1);
+    return { ok: true, enabled };
+  }
+  return { ok: false };
+});
 let settingsCore = null;
+const performanceMetrics = createPerformanceMetrics({
+  enabled: process.env.MARUST_PERF_METRICS === '1',
+  log: (line) => console.log(line)
+});
 let registry = null;
 let orchestrator = null;
 let modeSource = null;
@@ -267,6 +293,27 @@ function getDevMode() {
 }
 
 let obsStreamControlInst = null;
+let verifiedOutputControl = null;
+function getVerifiedOutputControl() {
+  if (!verifiedOutputControl) verifiedOutputControl = createObsOutputControl({
+    getEngine: () => engines && engines.engine,
+    getDestinations: () => stateStore ? stateStore.snapshot().destinations : [],
+    mainControl: async (action, flags) => {
+      if (flags && typeof flags.guard === 'function' && !flags.guard()) return { ok: false, error: 'plugin-stopped' };
+      if (flags && Number.isFinite(flags.deadlineAtMs) && Date.now() >= flags.deadlineAtMs) return { ok: false, error: 'operation-expired' };
+      const engine = engines && engines.engine;
+      if (flags && engine && Number.isFinite(flags.expectedStopRevision) && engine.getStopRevision('main') !== flags.expectedStopRevision) return { ok: false, error: 'human-stopped' };
+      const cancel = action === 'stop' && engine && typeof engine.expectMainStop === 'function' ? engine.expectMainStop() : null;
+      try { await getObsStreamControl().control(action); return { ok: true }; }
+      catch (err) {
+        if (cancel) cancel();
+        const allowed = ['obs-control-off', 'human-stopped', 'stopping', 'obs-not-connected'];
+        return { ok: false, error: allowed.includes(err && err.message) ? err.message : 'failed' };
+      }
+    }
+  });
+  return verifiedOutputControl;
+}
 function getObsStreamControl() {
   if (!obsStreamControlInst) {
     obsStreamControlInst = createObsStreamControl({
@@ -329,6 +376,7 @@ async function buildHubState() {
       },
       // 配信全体の開始・停止だけ（プラグインの ctx.obs.streamControl）。条件は host/core/engine/obs-stream-control.js。
       obsControl: function (action) { return getObsStreamControl().control(action); },
+      outputControl: getVerifiedOutputControl,
       modeFor(id) { return orchestrator ? orchestrator.modeFor(id) : 'legacy'; },
       store: stateStore
     });
@@ -427,6 +475,10 @@ function createWindow() {
     mainWindow = null;
   });
   const contents = mainWindow.webContents;
+  contents.on('did-create-window', (win) => {
+    popoutWindows.add(win);
+    win.once('closed', () => popoutWindows.delete(win));
+  });
   contents.on('will-navigate', (event, url) => {
     let parsed;
     try { parsed = new URL(url); } catch (_) { event.preventDefault(); return; }
@@ -445,7 +497,8 @@ function createWindow() {
       openInSystemBrowser(details && details.url); // 丸ストの中では開かない。使っているブラウザで開く
       return { action: 'deny' };
     }
-    return { action: 'allow', overrideBrowserWindowOptions: { autoHideMenuBar: true, width: 720, height: 560 } };
+    // Dockview が保存したポップアウトの大きさを window.open の指定から復元できるよう、ここで幅・高さを上書きしない。
+    return { action: 'allow', overrideBrowserWindowOptions: { autoHideMenuBar: true, webPreferences: { preload: path.join(__dirname, 'ui', 'popout-preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } } };
   });
   return mainWindow;
 }
@@ -661,7 +714,7 @@ async function startGateway() {
 async function fanoutFromHub(payload, source) {
   const input = coerceFanoutInput(payload);
   const summary = orchestrator
-    ? orchestrator.summarizeModes()
+    ? orchestrator.summarizeModes({ titleTargets: true })
     : { live: 0, shadow: 0, legacy: 0, forced: false, liveIds: [] };
   const confirmed = payload && payload.confirmed === true;
   const decision = hubFanoutDecision(summary, confirmed);
@@ -757,7 +810,7 @@ async function boot() {
   for (const row of hubState.plugins) {
     console.log('[marust] plugin id=' + row.id + ' kind=' + row.kind + ' status=' + row.status + (row.reason ? ' reason=' + row.reason : ''));
   }
-  clients = createClients({ core: settingsCore });
+  clients = createClients({ core: settingsCore, onChanged: () => bus.publish('clients.changed', {}, { source: '#core' }) });
   syncAutoPair();
   const opened = clients.ensureWindowClient();
   windowToken = opened.token;
@@ -788,6 +841,7 @@ async function boot() {
     logger: logLine
   });
   api = createApi({
+    performanceMetrics: performanceMetrics,
     confirmLive: process.env.MARUST_CONFIRM_LIVE === '1', // 既定は凍結（id の入力を求めない）。1 で戻す。docs/FROZEN.md
     getState: currentHubState,
     devMode: {
@@ -864,6 +918,7 @@ async function boot() {
     get gateway() { return gateway; },
     startedAt: startedAt
   });
+  performanceMetrics.start();
   hotkeys = createKeysPort({
     api: api,
     globalShortcut: globalShortcut,
@@ -942,6 +997,7 @@ if (!instance.primary) {
 }
 
 app.on('before-quit', (event) => {
+  if (typeof performanceMetrics !== 'undefined') performanceMetrics.stop();
   if (retention) {
     try { retention.stop(); } catch (_) { /* 整理の停止に失敗しても終了は続ける */ }
     retention = null;

@@ -347,6 +347,7 @@ function streamRenderButtons(box, groups, opts) {
 
 /** 「配信ボタン」パネル（id `destinations`）。 */
 function initStreamButtons() {
+  var call = panelCall('destinations');
   var root = panelRoot('destinations');
   if (!root || root.dataset.bound === '1') return;
   root.dataset.bound = '1';
@@ -394,7 +395,7 @@ function initStreamButtons() {
     allStart.disabled = !st.controlOn || !can.write || !st.ids.length;
   }
   function refresh() {
-    if (busy) return Promise.resolve();
+    if (busy || document.hidden || root.offsetParent === null) return Promise.resolve();
     busy = true;
     return Promise.all([
       call('engine.listTargets').then(function (r) { st.targets = Array.isArray(r) ? r : []; }).catch(function () {}),
@@ -413,10 +414,10 @@ function initStreamButtons() {
       paint();
     }).then(function () { busy = false; }, function () { busy = false; });
   }
-  // 押した直後は状態がすぐ変わるので、少しの間だけ読み直す（1・3・6・10 秒後）
+  // 配信操作後の保険更新は1回だけ。イベントが届いたら取り消す。
   function afterAction() {
     burst.forEach(clearTimeout);
-    burst = [1000, 3000, 6000, 10000].map(function (ms) { return setTimeout(function () { refresh(); }, ms); });
+    burst = [setTimeout(function () { if (root.offsetParent && !document.hidden) refresh(); }, 3000)];
   }
   function toggle(group) {
     if (!st.controlOn || !can.write) return;
@@ -439,13 +440,14 @@ function initStreamButtons() {
     hubApi().subscribe(function (msg) {
       var name = msg && msg.name;
       if (['engine.target.changed', 'broadcast.result', 'broadcast.stopped', 'modes.changed', 'stream.started', 'stream.stopped'].indexOf(name) === -1) return;
+      burst.forEach(clearTimeout); burst = [];
       if (evTimer) return;
-      evTimer = setTimeout(function () { evTimer = null; if (root.offsetParent) refresh(); }, 400);
+      evTimer = setTimeout(function () { evTimer = null; if (root.offsetParent && !document.hidden) refresh(); }, 400);
     });
   }
   refresh();
   // 起動直後は OBS・プラグインがまだ揃っていないことがあるので、最初だけ少し早めに読み直す
-  [2000, 5000, 9000].forEach(function (ms) { setTimeout(refresh, ms); });
+  setTimeout(refresh, 3000);
   setInterval(function () { if (root.offsetParent && !document.hidden) refresh(); }, 15000);
 }
 

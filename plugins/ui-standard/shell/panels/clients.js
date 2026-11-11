@@ -1,6 +1,7 @@
 'use strict';
 /** パネル `clients`（接続端末）。 */
 function initClients() {
+  var call = panelCall('clients');
   var root = panelRoot('clients');
   if (!root || root.dataset.bound === '1') return;
   root.dataset.bound = '1';
@@ -8,7 +9,8 @@ function initClients() {
   var codeEl = root.querySelector('#pair-code');
   var isWindow = false;
   function refresh() {
-    call('hub.getState').then(function (state) {
+    if (document.hidden || root.offsetParent === null) return Promise.resolve();
+    return call('hub.getState').then(function (state) {
       notePermissions(state && state.permissions); if (state && typeof state.confirmLive === 'boolean') confirmLiveWanted = state.confirmLive;
       isWindow = !!(state && state.clientId === 'local-window');
       var admin = root.querySelector('#client-admin');
@@ -131,9 +133,9 @@ function initClients() {
       codeEl.textContent = res.code || '';
     }).catch(function () {});
   });
-  refresh();
-  setInterval(refresh, 2000);
-  if (hubApi() && hubApi().subscribe) hubApi().subscribe(function () { refresh(); });
+  watchDisplay(root, refresh, function (msg) {
+    return !!(msg && /^(clients|auth)\./.test(msg.name || ''));
+  });
 }
 
 registerPanel('clients', initClients);

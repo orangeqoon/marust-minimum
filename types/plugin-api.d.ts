@@ -17,8 +17,8 @@ export interface PanelClaims {
   /** 初めの配置で開く段階（standard／advanced）。順番は dockOrder（小さいほど先） */
   dock?: Array<'standard' | 'advanced'>;
   dockOrder?: number;
-  /** 上のメニューの行。in: view（表示）／file（ファイル）／none（出さない）。言葉はプラグインが持つ */
-  menu?: { key: string; title: string; desc?: string; order?: number; in?: 'view' | 'file' | 'none'; min?: 'standard' | 'advanced'; orDev?: boolean };
+  /** 上のメニューの行。in: view（表示）／tools（ツール）／file（ファイル）／none（出さない）。言葉はプラグインが持つ */
+  menu?: { key: string; menuKey?: string; title: string; desc?: string; order?: number; in?: 'view' | 'tools' | 'file' | 'none'; min?: 'standard' | 'advanced'; orDev?: boolean };
 }
 
 export interface PluginManifest {
@@ -156,6 +156,20 @@ export interface PluginContext {
     aggregate(): { readonly ready: boolean; readonly known: boolean; readonly streaming: boolean; readonly emergency: boolean; readonly anyOutputLive: boolean };
     /** 旧い置き場（state.json）のセッションの写し。内蔵の session だけ（初回の移しかえ用） */
     legacySession(): unknown | null;
+  };
+  /** needs: operations.exclusive。終了まで排他を保持し、退役した世代は新たな副作用を開始しない。 */
+  readonly operations?: {
+    run<T>(task: (lease: { isCurrent(): boolean }) => T | Promise<T>): Promise<T | Fail> | Fail;
+  };
+  /** needs: obs.outputControl。expected は内部照合だけに用い保存・ログ・返却しない。 */
+  readonly outputs?: {
+    check(input: { destinationId: string; expected: { server: string; key: string; servers?: string[] } }, guard?: () => boolean): Promise<{
+      ok: boolean; error?: string; match?: 'match' | 'unknown' | 'mismatch'; proofId?: string;
+      kind?: string; destinationId?: string; engineId?: string; targetId?: string; state?: string;
+    }>;
+    control(input: { proofId: string; action: 'status' | 'stop' | 'start' }, guard?: () => boolean): Promise<{
+      ok: boolean; error?: string; streaming?: boolean; humanStopped?: boolean;
+    }>;
   };
   /** 核のキーの口（K3）。内蔵の hotkeys だけ（manifest needs に keys）。検査も押下の実行も核 */
   readonly keys?: {

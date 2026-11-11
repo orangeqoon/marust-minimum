@@ -1,7 +1,7 @@
 'use strict';
 const { hubSource } = require('./_ui-source');
 
-/** 題名の本番送信の確認は最初の 1 回だけ（fanoutAck）。保存・形の検査・画面が「聞く→保存→以後聞かない」になっていること。偽物だけ。 */
+/** 題名の本番送信は確認窓を出さず、fanoutAck の印だけを保存する。偽物だけ。 */
 
 const assert = require('assert');
 const fs = require('fs');
@@ -32,14 +32,28 @@ test('ui-settings: fanoutAck は既定 false・true を保存・他のキーを�
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('画面: 確認は confirmFanoutOnce に集約（home.js・hub.js が直に confirm を出さない）', () => {
+test('画面: 題名送信は確認窓を出さず、confirmFanoutOnce が確認済みの印だけを保存する', () => {
   const hub = hubSource();
   const home = read('plugins/ui-standard/shell/panels/home.js');
   assert.ok(hub.includes('function confirmFanoutOnce'));
-  assert.ok(hub.includes('s.fanoutAck === true && covered) return true'), '保存済み（予約の範囲内）なら聞かない。K3');
-  assert.ok(hub.includes("call('ui.setSettings', { fanoutAck: true })"), '「はい」のあとに保存');
+  assert.ok(hub.includes("call('ui.setSettings', { fanoutAck: true })"), '送信前に確認済みの印を保存');
+  assert.ok(!hub.includes('window.confirm(STR.fanoutConfirmOnce'), '長い確認窓を出さない');
   assert.ok(home.includes('confirmFanoutOnce(') && hub.includes('confirmFanoutOnce(names'));
   assert.ok(!home.includes("'本番送信するサイト: '") && !hub.includes("'本番送信するプラグイン: '"));
+});
+
+test('fanout確認と送信は同じ題名送り先だけを対象にする', () => {
+  const electron = read('electron-main.js');
+  const gate = electron.slice(electron.indexOf('async function fanoutFromHub'), electron.indexOf('async function startObs'));
+  assert.ok(gate.includes('orchestrator.summarizeModes({ titleTargets: true })'), 'AI/backupなど全pluginを題名送り先に含めない');
+  assert.ok(gate.includes('liveIds: decision.liveIds'), '確認UIには題名送り先だけを提示');
+  assert.ok(gate.includes('allowedLiveIdsForHub(payload, summary.liveIds)'), '送信時も同じsummary.liveIdsで絞る');
+  assert.ok(!gate.includes('orchestrator.summarizeModes()'), '全pluginを含むsummaryを使わない');
+});
+
+test('旧い長文の本番送信確認文を画面の文字列に残さない', () => {
+  const strings = read('plugins/ui-standard/shell/strings.js');
+  assert.ok(!strings.includes('fanoutConfirmOnce'));
 });
 
 if (failed) { console.error('\n[w58] ' + failed + ' failed'); process.exit(1); }

@@ -116,7 +116,10 @@ function initSecrets() {
       var admin = root.querySelector('#secret-admin');
       if (admin) admin.hidden = !isWindow;
       setReauthBusy(reauthBusy); // ボタンは画面の判定（ウィンドウか）が済む前に作られることがある。判定のあとで押せる状態に直す
-      return loginRead.then(function (login) { paintLogin(login, state && state.plugins); }, function () { paintLogin(null); });
+      return loginRead.then(function (login) { paintLogin(login, state && state.plugins); }, function () { paintLogin(null); }).then(function () {
+        if (!(typeof levelAtLeast === 'function' && levelAtLeast('advanced')) || !isWindow) { if (gcalBox) gcalBox.hidden = true; return; }
+        return call('calendar.loginStatus', {}).then(function (st) { paintGcalSection(st); }, function () { paintGcalSection(null); });
+      });
     }).catch(function () {}).then(function () {
       return displayRead('secrets.list');
     }).then(function (res) {
@@ -245,8 +248,87 @@ function initSecrets() {
       showStatus(err && err.message);
     });
   });
+  // Google カレンダー専用鍵（google.oauth）。上級だけ。サイト用 sites.setOAuthApp とは別経路。
+  var gcalBox = root.querySelector('#gcal-oauth');
+  var gcalForm = root.querySelector('#gcal-oauth-form');
+  var gcalIdEl = root.querySelector('#gcal-oauth-client-id');
+  var gcalSecEl = root.querySelector('#gcal-oauth-client-secret');
+  var gcalSaveBtn = root.querySelector('#gcal-oauth-save');
+  var gcalLoginBtn = root.querySelector('#gcal-oauth-login');
+  var gcalRekeyBtn = root.querySelector('#gcal-oauth-rekey');
+  var gcalStatus = root.querySelector('#gcal-oauth-status');
+  var gcalStateEl = root.querySelector('#gcal-oauth-state');
+  var gcalHaveKeys = false;
+  var gcalShowForm = false;
+  var gcalLinking = false;
+  function paintGcalSection(loginRes) {
+    if (!gcalBox) return;
+    var advanced = typeof levelAtLeast === 'function' && levelAtLeast('advanced');
+    if (!advanced || !isWindow) { gcalBox.hidden = true; return; }
+    gcalBox.hidden = false;
+    var title = root.querySelector('#gcal-oauth-title');
+    var note = root.querySelector('#gcal-oauth-note');
+    var guide = root.querySelector('#gcal-oauth-guide');
+    var idLabel = root.querySelector('#gcal-oauth-id-label');
+    var secLabel = root.querySelector('#gcal-oauth-secret-label');
+    if (title) title.textContent = STR.secretsGcalTitle;
+    if (note) note.textContent = STR.secretsGcalNote;
+    if (guide) { guide.href = STR.gcalGuidePath; guide.textContent = STR.gcalGuideLink; }
+    if (idLabel && gcalIdEl && idLabel.firstChild && idLabel.firstChild.nodeType === 3) idLabel.firstChild.textContent = STR.secretsGcalClientId + ' ';
+    else if (idLabel && gcalIdEl) { while (idLabel.firstChild && idLabel.firstChild !== gcalIdEl) idLabel.removeChild(idLabel.firstChild); idLabel.insertBefore(document.createTextNode(STR.secretsGcalClientId + ' '), gcalIdEl); }
+    if (secLabel && gcalSecEl) { while (secLabel.firstChild && secLabel.firstChild !== gcalSecEl) secLabel.removeChild(secLabel.firstChild); secLabel.insertBefore(document.createTextNode(STR.secretsGcalClientSecret + ' '), gcalSecEl); gcalSecEl.placeholder = STR.secretTailUnset; }
+    if (gcalSaveBtn) gcalSaveBtn.textContent = STR.secretsGcalSave;
+    var st = loginRes && loginRes.ok === true ? loginRes.state : null;
+    var known = st === 'none' || st === 'keys-only' || st === 'logged-in' || st === 'expired';
+    if (!known) {
+      if (gcalStateEl) gcalStateEl.textContent = STR.gcalLoginUnknown;
+      gcalHaveKeys = false;
+    } else {
+      gcalHaveKeys = st !== 'none';
+      if (gcalStateEl && !gcalLinking) gcalStateEl.textContent = STR.gcalLoginState(st);
+    }
+    if (gcalForm) gcalForm.style.display = (!gcalHaveKeys || gcalShowForm) ? '' : 'none';
+    if (gcalSaveBtn) { gcalSaveBtn.style.display = (!gcalHaveKeys || gcalShowForm) ? '' : 'none'; gcalSaveBtn.disabled = !can.write || gcalLinking; }
+    if (gcalRekeyBtn) { gcalRekeyBtn.textContent = STR.loginRekey; gcalRekeyBtn.style.display = gcalHaveKeys && !gcalShowForm ? '' : 'none'; gcalRekeyBtn.disabled = !can.write; }
+    if (gcalLoginBtn) {
+      gcalLoginBtn.textContent = st === 'logged-in' ? STR.loginRelink : STR.gcalLogin;
+      gcalLoginBtn.style.display = gcalHaveKeys && !gcalShowForm ? '' : 'none';
+      gcalLoginBtn.disabled = !can.write || gcalLinking || !gcalHaveKeys;
+    }
+  }
+  function runGcalLogin() {
+    gcalLinking = true;
+    if (gcalStatus) gcalStatus.textContent = STR.gcalLinking;
+    return call('auth.reauth', { site: 'google' }).then(function (res) {
+      if (gcalStatus) gcalStatus.textContent = res && res.ok === true ? STR.gcalLinkDone : STR.loginErr(res && res.error);
+    }).catch(function () {
+      if (gcalStatus) gcalStatus.textContent = STR.loginErr('failed');
+    }).then(function () { gcalLinking = false; refresh(); });
+  }
+  if (gcalSaveBtn) gcalSaveBtn.addEventListener('click', function () {
+    if (!isWindow || !can.write || gcalLinking) return;
+    var body = { clientId: gcalIdEl ? gcalIdEl.value : '', clientSecret: gcalSecEl ? gcalSecEl.value : '' };
+    if (gcalSecEl) gcalSecEl.value = '';
+    gcalLinking = true;
+    if (gcalStatus) gcalStatus.textContent = '';
+    call('calendar.setOAuthApp', body).then(function (res) {
+      gcalLinking = false;
+      if (!res || res.ok === false) { if (gcalStatus) gcalStatus.textContent = STR.loginErr(res && res.error); paintGcalSection(null); return; }
+      if (gcalIdEl) gcalIdEl.value = '';
+      gcalShowForm = false;
+      if (gcalStatus) gcalStatus.textContent = STR.secretsGcalSaved;
+      return runGcalLogin();
+    }).catch(function () { gcalLinking = false; if (gcalStatus) gcalStatus.textContent = STR.loginErr('failed'); });
+  });
+  if (gcalLoginBtn) gcalLoginBtn.addEventListener('click', function () {
+    if (!isWindow || !can.write || gcalLinking || !gcalHaveKeys) return;
+    if (!window.confirm(STR.gcalLinkConfirm)) return;
+    runGcalLogin();
+  });
+  if (gcalRekeyBtn) gcalRekeyBtn.addEventListener('click', function () { gcalShowForm = true; paintGcalSection({ ok: true, state: gcalHaveKeys ? 'keys-only' : 'none' }); });
+
   refresh = watchDisplay(root, loadSecrets, function (msg) {
-    return !!(msg && /^(auth|modes|plugin|feature)\./.test(msg.name || ''));
+    return !!(msg && /^(auth|modes|plugin|feature|calendar)\./.test(msg.name || ''));
   });
 }
 

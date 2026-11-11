@@ -183,6 +183,7 @@ function createLifecycle(S) {
   }
 
   async function teardown(rec) {
+    if (rec.ctxOperationLease) rec.ctxOperationLease.retire();
     clearSubs(rec);
     dropActions(rec);
     // 止める・読み直すプラグインが取っていたコメントの入り口は、プラグインの後始末（release）に頼らずホストが手放す。

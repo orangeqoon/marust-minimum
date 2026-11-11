@@ -25,6 +25,7 @@
   let seq = 0;
   const waiting = {};
   let armed = false;
+  let panelActive = true;
 
   function call(method, params, done) {
     seq += 1;
@@ -121,5 +122,11 @@
   });
 
   refresh(false);
-  setInterval(() => { if (!document.hidden) refresh(false); }, 15000);
+  window.addEventListener('message', (event) => {
+    const msg = event && event.data;
+    if (!msg || msg.type !== 'marust:panel-activity') return;
+    panelActive = msg.active !== false;
+    if (panelActive) refresh(false);
+  });
+  setInterval(() => { if (panelActive && !document.hidden) refresh(false); }, 15000);
 })();

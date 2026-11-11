@@ -695,6 +695,21 @@ async function main() {
     assert.ok(JSON.stringify(panel).indexOf(HEADER) === -1);
   });
 
+  await test('SOOP は配信情報APIのキャプチャを保存先として扱わない', async () => {
+    const env = boot(createSiteSoop, 'site-soop', {
+      secrets: {
+        'cookies.soop-main': { u_s: COOKIE },
+        'capture.soop-main.soop-save': soopCapture({
+          url: 'https://live.sooplive.com/afreeca/player_live_api.php?bjid=test'
+        })
+      },
+      fetch: async function fetch() { throw new Error('must-not-send'); }
+    });
+    assert.strictEqual(await env.api.isConfigured(), false);
+    assert.deepStrictEqual(await env.api.updateMetadata({ title: 'Hello' }, {}), { ok: false, error: 'not-configured' });
+    assert.strictEqual(env.calls.length, 0);
+  });
+
   await test('空の題名はどのサイトも送らない', async () => {
     const sites = [
       [createSiteKukulu, 'site-kukulu', { 'kukulu.config': { apikey: 'abc123' } }],

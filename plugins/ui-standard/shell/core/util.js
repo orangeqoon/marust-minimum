@@ -1,14 +1,9 @@
 'use strict';
 /** 共通の小さな道具（API 呼び出し・要素づくり・文字の整形）。 */
-/** 題名の本番送信の確認は最初の 1 回だけ。「はい」を押したら ui-settings の fanoutAck を保存し、以後は聞かない。読めないときは毎回聞く（安全側）。 */
-// ids（今の live の送り先）を渡すと、予約（fanoutAckLiveIds）に無い送り先が増えているときは、確認済みでも聞き直す。force は「もう一度確認する」ボタン用（K3）。
+/** 題名の本番送信は確認窓を出さず、送信前に確認済みの印だけを保存する。 */
+// ids と force は古い呼び出し側との互換性のため受け取るが、画面には表示しない。
 function confirmFanoutOnce(names, ids, force) {
-  return call('ui.getSettings', {}).then(function (s) {
-    var covered = !Array.isArray(ids) || !Array.isArray(s && s.fanoutAckLiveIds) || ids.every(function (id) { return s.fanoutAckLiveIds.indexOf(id) !== -1; });
-    if (!force && s && s.ok !== false && s.fanoutAck === true && covered) return true;
-    if (!window.confirm(STR.fanoutConfirmOnce(names))) return false;
-    return call('ui.setSettings', { fanoutAck: true }).then(function () { return true; }, function () { return true; });
-  }, function () { return window.confirm(STR.fanoutConfirmOnce(names)); });
+  return call('ui.setSettings', { fanoutAck: true }).then(function () { return true; }, function () { return true; });
 }
 /** プラグインの iframe（marust:ui）が頼む通知と確認。文字だけを textContent で出す。どのプラグインの言葉か頭に付ける（本体の言葉と見分けるため）。 */
 var pluginToastTimer = null;
@@ -55,14 +50,96 @@ function loadUiLevel() {
 function hubApi() {
   return window.marustApi;
 }
+// 開発者がコンソールから明示的に開始したときだけ、パネル別の論理呼び出しを数える。
+var uiMetricRows = Object.create(null), uiMetricMarks = [], uiMetricsEnabled = false, uiMetricsEpoch = 0;
+window.marustUiMetrics = {
+  start: function () { uiMetricRows = Object.create(null); uiMetricMarks = []; uiMetricsEnabled = true; uiMetricsEpoch++; },
+  stop: function () { uiMetricsEnabled = false; },
+  mark: function (name, data) {
+    if (!uiMetricsEnabled) return false;
+    if (uiMetricMarks.length >= 256) return false;
+    var row = { name: String(name || ''), at: Date.now() };
+    if (data && typeof data === 'object') {
+      if (typeof data.panelId === 'string') row.panelId = data.panelId;
+      if (typeof data.popoutId === 'string') row.popoutId = data.popoutId;
+      if (typeof data.active === 'boolean') row.active = data.active;
+    }
+    uiMetricMarks.push(row);
+    return true;
+  },
+  snapshot: function () {
+    var out = JSON.parse(JSON.stringify(uiMetricRows));
+    Object.defineProperty(out, '__marks', {
+      value: JSON.parse(JSON.stringify(uiMetricMarks)),
+      enumerable: false,
+      configurable: true
+    });
+    return out;
+  }
+};
+function panelCall(panel) {
+  return function (method, params) {
+    if (!uiMetricsEnabled) return call(method, params);
+    var started = Date.now(), key = panel + ':' + method, epoch = uiMetricsEpoch;
+    function record() {
+      if (!uiMetricsEnabled || epoch !== uiMetricsEpoch) return;
+      if (!uiMetricRows[key] && Object.keys(uiMetricRows).length >= 512) return;
+      var row = uiMetricRows[key] || (uiMetricRows[key] = { count: 0, totalMs: 0, maxMs: 0 });
+      var elapsed = Math.max(0, Date.now() - started);
+      row.count++; row.totalMs += elapsed; row.maxMs = Math.max(row.maxMs, elapsed);
+    }
+    return call(method, params).then(function (value) { record(); return value; }, function (error) { record(); throw error; });
+  };
+}
+var hubDisplaySnapshot = null;
+var hubDisplayApi = null;
+var hubDisplayUnsubscribe = null;
+function invalidateHubDisplay() { hubDisplaySnapshot = null; }
+if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('pagehide', function (ev) {
+  if (ev && ev.persisted) return;
+  if (typeof hubDisplayUnsubscribe === 'function') hubDisplayUnsubscribe();
+  hubDisplayUnsubscribe = null; hubDisplayApi = null;
+  invalidateHubDisplay();
+});
+function copyHubDisplay(value) {
+  return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value));
+}
 function call(method, params) {
   var api = hubApi();
   if (!api || typeof api.call !== 'function') return Promise.reject(new Error('no-api'));
-  return api.call(method, params);
+  if (hubDisplayApi !== api) {
+    if (typeof hubDisplayUnsubscribe === 'function') hubDisplayUnsubscribe();
+    hubDisplayApi = api;
+    invalidateHubDisplay();
+    hubDisplayUnsubscribe = api.subscribe ? api.subscribe(function (msg) {
+      if (displayStateEvent(msg) || (msg && /^(approval|clients)\./.test(msg.name || ''))) invalidateHubDisplay();
+    }) : null;
+  }
+  if (method !== 'hub.getState' || (params && Object.keys(params).length)) {
+    // 操作直後の画面は、操作前のスナップショットを使わない。
+    var reading = /^(hub|engine|destination|broadcast|modes|home|sites|tips|favorites|chat|features)\.(getState|list|listTargets|targetStats|status|last|view|inlets|loginStatus|get|sets)$/.test(method);
+    if (reading) return api.call(method, params);
+    invalidateHubDisplay();
+    return Promise.resolve(api.call(method, params)).then(function (result) { invalidateHubDisplay(); return result; }, function (error) { invalidateHubDisplay(); throw error; });
+  }
+  if (!hubDisplaySnapshot || Date.now() >= hubDisplaySnapshot.expiresAt) {
+    var entry = { expiresAt: Infinity, pending: null };
+    hubDisplaySnapshot = entry;
+    entry.pending = Promise.resolve().then(function () { return api.call(method, params); }).then(function (result) {
+      entry.expiresAt = Date.now() + 150;
+      if (!result || result.ok === false) { if (hubDisplaySnapshot === entry) invalidateHubDisplay(); }
+      return result;
+    }, function (error) {
+      if (hubDisplaySnapshot === entry) invalidateHubDisplay();
+      throw error;
+    });
+  }
+  return hubDisplaySnapshot.pending.then(copyHubDisplay);
 }
 // 表示用の読み取りだけを、この窓の同時実行中に限って共有する。結果は保存しない。
 var displayReads = Object.create(null);
 function displayRead(method) {
+  if (method === 'hub.getState') return call(method);
   if (displayReads[method]) return displayReads[method];
   var pending = Promise.resolve().then(function () { return call(method); });
   displayReads[method] = pending;

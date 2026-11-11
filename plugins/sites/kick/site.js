@@ -22,6 +22,9 @@ const MAX_BODY = 1024 * 1024;
 const KNOWN = new Set([
   'not-configured',
   'needs-title-or-category',
+  'category-not-found',
+  'title-not-reflected',
+  'category-not-reflected',
   'unauthorized',
   'refresh-failed',
   'refresh-unavailable',
@@ -459,16 +462,17 @@ function createSiteKick(deps) {
         refreshes = 0;
         const payload = {};
         if (title.trim()) payload.stream_title = title;
+        let categoryMissing = false;
         if (category) {
           const categoryId = await searchCategory(category);
           if (categoryId != null && categoryId !== '') {
             const num = Number(categoryId);
             payload.category_id = Number.isFinite(num) ? num : categoryId;
-          }
+          } else { categoryMissing = true; }
         }
         if (Object.keys(payload).length === 0) {
           log('info', 'update ok');
-          return finish(true);
+          return finish(false, 'category-not-found');
         }
         const body = JSON.stringify(payload);
         let res = await call(CHANNELS_URL, function (token) {
@@ -489,12 +493,26 @@ function createSiteKick(deps) {
           });
           if (retryRes.status === 200 || retryRes.status === 204) {
             log('warn', 'category-rejected title-updated');
-            return finish(true);
+            finish(true);
+            return { ok: true, verified: false, reason: 'category-not-updated' };
           }
         }
         if (res.status !== 200 && res.status !== 204) return finish(false, httpCode(res.status));
         log('info', 'update ok');
-        return finish(true);
+        finish(true);
+        if (categoryMissing) return { ok: true, verified: false, reason: 'category-not-updated' };
+        try {
+          const check = await call(CHANNELS_URL, function (token) { return { method: 'GET', headers: kickHeaders(token) }; });
+          if (check.status !== 200) return { ok: true, verified: false, reason: 'not-verified' };
+          const json = parseJson(await readText(check));
+          const row = json && (Array.isArray(json.data) ? json.data[0] : json.data);
+          if (!row || typeof row !== 'object') return { ok: true, verified: false, reason: 'not-verified' };
+          if (payload.stream_title && typeof row.stream_title === 'string' && row.stream_title !== payload.stream_title) return finish(false, 'title-not-reflected');
+          if (payload.category_id != null && row.category && row.category.id != null && String(row.category.id) !== String(payload.category_id)) return finish(false, 'category-not-reflected');
+          const titleVerified = !payload.stream_title || typeof row.stream_title === 'string';
+          const categoryVerified = payload.category_id == null || !!(row.category && row.category.id != null);
+          return titleVerified && categoryVerified ? { ok: true, verified: true } : { ok: true, verified: false, reason: 'not-verified' };
+        } catch (_) { return { ok: true, verified: false, reason: 'not-verified' }; }
       } catch (err) {
         const code = asCode(err);
         log('warn', 'update ' + code);

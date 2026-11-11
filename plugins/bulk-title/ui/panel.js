@@ -15,6 +15,7 @@ var phaseBadgeEl = document.getElementById('phase-badge');
 var phaseSummaryEl = document.getElementById('phase-summary');
 var siteCardsEl = document.getElementById('site-cards');
 var devMode = false;
+var panelActive = true;
 
 var SITE_LABELS = {
   youtube: 'YouTube',
@@ -81,13 +82,53 @@ function needDetail(need, how) {
   return h ? n + '（' + h + '）' : n;
 }
 
+function addKickRelink(container) {
+  var button = el('button', 'card-action-btn', 'Kickを結び直す');
+  var status = el('span', 'hint', '');
+  button.type = 'button';
+  button.disabled = window.marust.can().write !== true;
+  button.addEventListener('click', function () {
+    if (button.disabled) return;
+    button.disabled = true;
+    status.textContent = 'ブラウザでKickの認証を進めてください。';
+    window.marust.relay('auth.reauth', { site: 'kick' }).then(function (r) {
+      status.textContent = r && r.ok ? '結び直しが完了しました。題名を確認して再送してください。' : '結び直しに失敗しました。金庫のKickログイン設定を確認してください。';
+    }).catch(function () { status.textContent = '結び直しに失敗しました。'; }).finally(function () { button.disabled = window.marust.can().write !== true; });
+  });
+  container.appendChild(button);
+  container.appendChild(status);
+}
+
+function addYouTubeRelink(container) {
+  var button = el('button', 'card-action-btn', 'YouTubeをつなぎ直す');
+  var status = el('span', 'hint', '');
+  status.setAttribute('aria-live', 'polite');
+  button.type = 'button';
+  button.disabled = window.marust.can().write !== true;
+  button.addEventListener('click', function () {
+    if (button.disabled) return;
+    button.disabled = true;
+    status.textContent = 'ブラウザでGoogleの認証を進めてください。';
+    window.marust.relay('auth.reauth', { site: 'youtube' }).then(function (r) {
+      status.textContent = r && r.ok ? 'つなぎ直しが完了しました。題名を確認して再送してください。' : 'つなぎ直しに失敗しました。金庫のYouTubeログイン設定を確認してください。';
+    }).catch(function () { status.textContent = 'つなぎ直しに失敗しました。'; }).finally(function () { button.disabled = window.marust.can().write !== true; });
+  });
+  container.appendChild(button);
+  container.appendChild(status);
+}
+
 function humanizeMessage(result, message, configured, mode, need, how) {
   if (mode === 'legacy' || message === 'legacy-mode') return { label: '送信オフ', detail: '「題名を送る」がオフです', tone: 'card-off' };
+  if (mode === 'shadow' || message === 'dry-run') return { label: '試験送信', detail: 'サイトには送信していません', tone: 'card-warn' };
+  if (result === 'unverified') return { label: '反映を確認してください', detail: message === 'category-not-updated' ? '題名は送信しました。カテゴリは更新できませんでした' : '送信しましたが、サイト側の反映は未確認です', tone: 'card-warn' };
   if (result === 'ok') return { label: '反映完了', detail: '題名・カテゴリを更新しました', tone: 'card-ok' };
   if (message === 'not-configured' || message === 'not-configured-timeout' || configured === false) {
     return { label: '未設定・要ログイン', detail: needDetail(need, how) || '鍵とログインで設定が必要です', tone: 'card-warn' };
   }
   if (message === 'live-not-confirmed') return { label: '確認待ち', detail: '送信確認待ちです', tone: 'card-warn' };
+  if (message === 'title-not-reflected') return { label: '題名が未反映', detail: '送信後に確認しましたが、サイトの題名が変わっていません', tone: 'card-error' };
+  if (message === 'category-not-reflected') return { label: 'カテゴリ未反映', detail: '送信後に確認しましたが、カテゴリが変わっていません', tone: 'card-error' };
+  if (message === 'category-not-found') return { label: 'カテゴリ未反映', detail: 'カテゴリが見つからず、送信していません', tone: 'card-warn' };
   if (message === 'needs-title' || message === 'needs-title-or-category') return { label: '入力待ち', detail: '題名を入力してください', tone: 'card-warn' };
   if (result === 'error') {
     var detail = message === 'unauthorized' || message === 'login-expired'
@@ -162,6 +203,8 @@ function updateLiveDisplay(phaseOverride) {
 
       if (mode !== 'legacy' && (info.tone === 'card-error' || info.tone === 'card-warn')) {
         var actions = el('div', 'card-actions');
+        if (site === 'youtube' && (info.tone === 'card-error' || configured === false || (r && r.message === 'not-configured'))) addYouTubeRelink(actions);
+        if (site === 'kick' && (configured === false || (r && ['not-configured', 'no-credentials', 'unauthorized', 'login-expired', 'refresh-failed', 'refresh-unavailable'].indexOf(r.message) !== -1))) addKickRelink(actions);
         var dash = SITE_DASHBOARDS[site];
         if (dash) {
           var dashA = el('a', 'card-action-btn external', dash.label);
@@ -208,7 +251,7 @@ function updateLiveDisplay(phaseOverride) {
     if (phase === 'sending') {
       phaseSummaryEl.textContent = '現在、有効な配信サイトへ題名とカテゴリを一斉送信しています…';
     } else if (lastTitleState && lastTitleState.lastTitle) {
-      phaseSummaryEl.textContent = '直近の反映: 「' + lastTitleState.lastTitle + '」' + (lastTitleState.lastCategory ? ' / カテゴリ: ' + lastTitleState.lastCategory : '') + '（ホーム・タイマーと同期中）';
+      phaseSummaryEl.textContent = '直近の送信: 「' + lastTitleState.lastTitle + '」' + (lastTitleState.lastCategory ? ' / カテゴリ: ' + lastTitleState.lastCategory : '') + '（ホーム・タイマーと同期中）';
     } else {
       phaseSummaryEl.textContent = 'ホーム・題名パネル・タイマーのすべてがこのタイトル変更プラグインの状態を同期しています。';
     }
@@ -502,6 +545,7 @@ function refresh() {
 
 if (typeof window.marust.onEvent === 'function') {
   window.marust.onEvent('stream.metadata.changed', function (payload) {
+    if (!panelActive) return;
     if (payload && typeof payload.title === 'string' && document.activeElement !== titleInput) {
       titleInput.value = payload.title;
       if (favTitle && favTitle.paintStar) favTitle.paintStar();
@@ -523,6 +567,12 @@ var favCategory = attachFavorites(categoryInput, 'category');
 armButton();
 refresh();
 refreshCategorySites();
+window.addEventListener('message', function (event) {
+  var msg = event && event.data;
+  if (!msg || msg.type !== 'marust:panel-activity') return;
+  panelActive = msg.active !== false;
+  if (panelActive) { refresh(); refreshCategorySites(); }
+});
 // 表示中の更新は 15 秒以上あける（画面から定期的に呼ぶ API の決まり）
-setInterval(refresh, 15000);
-setInterval(refreshCategorySites, 30000);
+setInterval(function () { if (panelActive) refresh(); }, 15000);
+setInterval(function () { if (panelActive) refreshCategorySites(); }, 30000);

@@ -8,7 +8,7 @@
   "tags": [
     "コメント送信"
   ],
-  "version": "1.0.0",
+  "version": "1.0.7",
   "tier": "standard",
   "manifestVersion": 2,
   "runtime": "inproc",
@@ -57,11 +57,13 @@
   ],
   "ui": {
     "relay": [
-      "sites.setCommentSend"
+      "sites.setCommentSend",
+      "auth.reauth"
     ]
   },
   "actions": {
-    "send": "write"
+    "send": "write",
+    "openFc2": "write"
   },
   "defaultMode": "legacy",
   "audience": "public",
@@ -80,6 +82,12 @@
   "needs": [
     "api.register",
     "events.emit",
-    "peers"
-  ]
+    "peers",
+    "external.open"
+  ],
+  "external": {
+    "hosts": [
+      "live.fc2.com"
+    ]
+  }
 }

@@ -3,6 +3,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..', '..');
 const DANGER = 'title|name|text|comment|message|author|userName|displayName';
@@ -146,7 +147,24 @@ async function main() {
     assert.ok(start !== -1);
     const fn = hub.slice(start, hub.indexOf('stick) list.scrollTop', start));
     assert.ok(hub.indexOf('node.textContent = text') !== -1);
-    assert.ok(fn.indexOf("el('span', 'bubble-author'") !== -1 && fn.indexOf("el('div', 'chat-text'") !== -1 && fn.indexOf("el('span', 'bubble-meta'") !== -1);
+    // Exercise text rendering instead of pinning CSS names from an older UI.
+    class Element {
+      constructor() { this.children = []; this.textContent = ''; }
+      appendChild(child) { this.children.push(child); }
+      setAttribute() {}
+      set innerHTML(_value) { throw new Error('untrusted HTML insertion'); }
+    }
+    const list = new Element();
+    const sandbox = { list, document: { createElement: () => new Element() },
+      clear(node) { node.children = []; }, siteLabel: value => value, chatTime: () => '' };
+    const helper = hub.slice(hub.indexOf('function el('), hub.indexOf('function writable('));
+    vm.runInNewContext(helper + hub.slice(start, hub.indexOf('function refresh(', start)) + '\nthis.paint = paintChat;', sandbox);
+    const attack = '<img src=x onerror=alert(1)>';
+    sandbox.paint([{ site: attack, name: attack, text: attack }]);
+    const bubble = list.children[0];
+    assert.strictEqual(bubble.children[0].children[0].textContent, attack);
+    assert.strictEqual(bubble.children[0].children[1].textContent, attack);
+    assert.strictEqual(bubble.children[1].textContent, attack);
     assert.strictEqual(fn.indexOf('innerHTML'), -1);
   });
 

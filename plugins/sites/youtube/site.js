@@ -25,7 +25,8 @@ const KNOWN = new Set([
   'refresh-failed',
   'refresh-unavailable',
   'network',
-  'invalid-response'
+  'invalid-response',
+  'title-not-reflected'
 ]);
 
 function fail(code) {
@@ -413,8 +414,49 @@ function createSiteYoutube(deps) {
           return authInit(token, 'PUT', body);
         });
         if (res.status < 200 || res.status >= 300) return finish(false, httpCode(res.status));
-        log('info', 'update ok');
-        return finish(true);
+        // 成功応答だけでは反映を保証できない。同一 ID を読み戻して確認する。
+        stage = 'verify-title';
+        try {
+          const verifyUrl = LIST_ROOT + '?part=snippet&id=' + encodeURIComponent(found.item.id);
+          const verifyRes = await call(verifyUrl, function (token) {
+            return authInit(token, 'GET');
+          });
+          if (verifyRes.status < 200 || verifyRes.status >= 300) {
+            lastOk = true;
+            lastAt = nowIso();
+            lastError = '';
+            lastStage = stage;
+            log('info', 'updated-unverified');
+            return { ok: true, verified: false };
+          }
+          const verifyJson = parseJson(await readText(verifyRes));
+          const again = firstBroadcast(verifyJson);
+          const observed = again && again.snippet && again.snippet.title;
+          if (typeof observed !== 'string') {
+            lastOk = true;
+            lastAt = nowIso();
+            lastError = '';
+            lastStage = stage;
+            log('info', 'updated-unverified');
+            return { ok: true, verified: false };
+          }
+          if (observed !== title) {
+            return finish(false, 'title-not-reflected');
+          }
+          lastOk = true;
+          lastAt = nowIso();
+          lastError = '';
+          lastStage = stage;
+          log('info', 'update verified');
+          return { ok: true, verified: true };
+        } catch (_) {
+          lastOk = true;
+          lastAt = nowIso();
+          lastError = '';
+          lastStage = stage;
+          log('info', 'updated-unverified');
+          return { ok: true, verified: false };
+        }
       } catch (err) {
         const code = asCode(err);
         log('warn', 'update ' + code);

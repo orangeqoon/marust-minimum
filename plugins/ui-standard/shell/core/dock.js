@@ -69,6 +69,14 @@ function openDefaultPluginPanels() {
 function syncToggles() {
   // 旧: 画面上部のチェックボックス一覧。今は上部メニューが開くたびに作り直すので、何もしない。
 }
+function dropStageHiddenPanels() {
+  // signal/timer は上級専用。保存済み配置から復元されても、中級では開いたままにしない。
+  if (uiLevel !== 'standard' || !dockApi) return;
+  pluginPanelRows().forEach(function (row) {
+    if (!row || !row.menu || ['signal', 'timer'].indexOf(row.menu.key) === -1) return;
+    if (dockApi.getPanel(row.id)) closePanel(row.id);
+  });
+}
 function refreshPluginCatalog() {
   return call('hub.getState').then(function (state) {
     catalogTries = 0;
@@ -78,6 +86,7 @@ function refreshPluginCatalog() {
     if (typeof noteSiteOrder === 'function') noteSiteOrder(plugins);
     moveAliasedPanels();
     if (pluginHost && typeof pluginHost.sync === 'function') pluginHost.sync(plugins);
+    dropStageHiddenPanels();
     if (typeof syncHomeSlots === 'function') syncHomeSlots();
     openDefaultPluginPanels();
     syncToggles();
@@ -212,26 +221,83 @@ function mountDock() {
   document.body.classList.add('docked');
   dockApi = window.dockview.createDockview(el, {
     className: 'dockview-theme-github-dark-spaced',
+    // ポップアウト窓との間でもタブをドラッグできる方式。
+    // Dockviewが同じポップアウト窓のドロップ位置を左右・上下の分割として処理する。
+    dndStrategy: 'html5',
     createRightHeaderActionComponent: function (group) {
       var el = document.createElement('div');
       el.className = 'dock-actions-right';
-      var floatBtn = document.createElement('button');
-      floatBtn.type = 'button';
-      floatBtn.className = 'dock-icon-btn';
-      floatBtn.title = STR.uiDock1;
-      floatBtn.setAttribute('aria-label', STR.uiDock2);
-      floatBtn.textContent = '⧉';
-      floatBtn.addEventListener('click', function () {
-        try {
-          var loc = group.api.location;
-          if (loc && loc.type === 'floating') {
-            group.api.moveTo({ position: 'right' });
-          } else {
-            dockApi.addFloatingGroup(group.activePanel || group, { width: 460, height: 420 });
-          }
-        } catch (_) { /* 浮かせられない構成では何もしない */ }
+      var refreshBtn = document.createElement('button');
+      refreshBtn.type = 'button';
+      refreshBtn.className = 'dock-icon-btn';
+      refreshBtn.title = STR.uiDockRefresh1;
+      refreshBtn.setAttribute('aria-label', STR.uiDockRefresh2);
+      refreshBtn.textContent = '↻';
+      refreshBtn.addEventListener('click', function () {
+        var panel = group && group.activePanel;
+        var panelId = panel && typeof panel.id === 'string' ? panel.id : '';
+        var parsed = pluginHost && typeof pluginHost.parsePanelId === 'function'
+          ? pluginHost.parsePanelId(panelId) : null;
+        var pluginId = parsed && typeof parsed.pluginId === 'string' ? parsed.pluginId : '';
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = '…';
+        var api = hubApi();
+        var reload = pluginId && api && typeof api.call === 'function'
+          ? Promise.resolve(api.call('plugin.reload', { id: pluginId }))
+          : Promise.resolve({ ok: true });
+        reload.then(function () {
+          if (pluginId && pluginHost && typeof pluginHost.reloadPlugin === 'function') pluginHost.reloadPlugin(pluginId);
+        }).catch(function () {
+          if (pluginId && pluginHost && typeof pluginHost.reloadPlugin === 'function') pluginHost.reloadPlugin(pluginId);
+        }).finally(function () {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = '↻';
+        });
       });
-      el.appendChild(floatBtn);
+      el.appendChild(refreshBtn);
+      function addPopoutToggle(symbol, label, action) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'dock-icon-btn dock-popout-only';
+        btn.setAttribute('aria-pressed', 'false');
+        function paint(enabled) {
+          var text = label + (enabled ? '：オン' : '：オフ');
+          btn.textContent = symbol + (enabled ? ' ON' : ' OFF');
+          btn.title = text;
+          btn.setAttribute('aria-label', text);
+          btn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        }
+        function getBridge() {
+          var owner = btn.ownerDocument && btn.ownerDocument.defaultView;
+          return owner && owner.marustPopout;
+        }
+        function sync() {
+          var bridge = getBridge();
+          if (!bridge || typeof bridge.toggle !== 'function') return;
+          Promise.resolve(bridge.toggle('state')).then(function (state) {
+            if (state && state.ok) paint(state[action] === true);
+          }).catch(function () {});
+        }
+        paint(false);
+        btn.addEventListener('mouseenter', sync);
+        btn.addEventListener('focus', sync);
+        btn.addEventListener('click', function () {
+          var bridge = getBridge();
+          if (!bridge || typeof bridge.toggle !== 'function') {
+            btn.title = label + '：使用できません。丸ストの再起動が必要な場合があります。';
+            if (typeof window.alert === 'function') window.alert(btn.title);
+            return;
+          }
+          btn.disabled = true;
+          Promise.resolve(bridge.toggle(action)).then(function (result) {
+            if (result && result.ok) paint(result.enabled === true);
+            else if (typeof window.alert === 'function') window.alert(label + 'を切り替えられませんでした。');
+          }).catch(function () { if (typeof window.alert === 'function') window.alert(label + 'を切り替えられませんでした。'); }).finally(function () { btn.disabled = false; });
+        });
+        el.appendChild(btn);
+      }
+      addPopoutToggle('📌', '常に手前に表示', 'pin');
+      addPopoutToggle('◐', '半透明', 'ghost');
       var popBtn = document.createElement('button');
       popBtn.type = 'button';
       popBtn.className = 'dock-icon-btn';
@@ -268,6 +334,54 @@ function mountDock() {
     }
   });
   pluginHost = createPluginHost({ api: hubApi(), dockview: dockApi, decorate: decoratePluginPanel, toast: PLUGIN_HOST_UI.toast, confirm: PLUGIN_HOST_UI.confirm, confirmFanout: PLUGIN_HOST_UI.confirmFanout, parentAction: PLUGIN_HOST_UI.parentAction });
+  // 本体と分離窓でテーマの色・文字の設定を共有する。
+  var marustPopoutWindows = [];
+  var popupTabActivation = typeof createPopoutTabActivation === 'function' ? createPopoutTabActivation({ dockview: dockApi }) : null;
+  var popupTabBindings = new Map();
+  function syncPopoutTheme(target) {
+    try {
+      target.document.documentElement.style.cssText = document.documentElement.style.cssText;
+      target.document.body.classList.add('marust-popout');
+    } catch (_) { /* 閉じた窓 */ }
+  }
+  window.marustAttachPopout = function (target) {
+    if (!target) return;
+    if (marustPopoutWindows.indexOf(target) === -1) marustPopoutWindows.push(target);
+    if (popupTabActivation && !popupTabBindings.has(target)) popupTabBindings.set(target, popupTabActivation.attach(target));
+    syncPopoutTheme(target);
+    if (pluginHost && typeof pluginHost.attachWindow === 'function') pluginHost.attachWindow(target);
+  };
+  document.addEventListener('marust:theme-applied', function () { marustPopoutWindows.forEach(syncPopoutTheme); });
+  // Dockviewのポップアウトはiframeを別Windowへ移す。移動後も同じ
+  // plugin-hostのAPI・権限・イベント経路を使えるよう、受信窓だけ追加する。
+  if (dockApi && pluginHost && typeof pluginHost.attachWindow === 'function' && dockApi.onDidAddPopoutGroup) {
+    var popoutMessageWindows = {};
+    dockApi.onDidAddPopoutGroup(function (event) {
+      if (event && event.window) {
+        if (event.id) popoutMessageWindows[event.id] = event.window;
+        window.marustAttachPopout(event.window);
+      }
+    });
+    if (dockApi.onDidRemovePopoutGroup && typeof pluginHost.detachWindow === 'function') {
+      dockApi.onDidRemovePopoutGroup(function (event) {
+        if (!event) return;
+        // ウィンドウが閉じた後は event.window が null のことがある。
+        var oldWindow = event.window || (event.id && popoutMessageWindows[event.id]);
+        if (oldWindow) {
+          if (popupTabBindings.has(oldWindow)) { popupTabBindings.get(oldWindow)(); popupTabBindings.delete(oldWindow); }
+          pluginHost.detachWindow(oldWindow);
+          var index = marustPopoutWindows.indexOf(oldWindow);
+          if (index !== -1) marustPopoutWindows.splice(index, 1);
+        }
+        if (event.id) delete popoutMessageWindows[event.id];
+      });
+    }
+  }
+  window.addEventListener('pagehide', function (event) {
+    if (event && event.persisted) return;
+    popupTabBindings.forEach(function (dispose) { dispose(); });
+    popupTabBindings.clear();
+  });
   watchTabDragOut();
   if (hubApi() && typeof hubApi().subscribe === 'function') {
     hubApi().subscribe(function (msg) { if (msg && msg.name === 'modes.changed') refreshPluginCatalog(); });
@@ -278,24 +392,39 @@ function mountDock() {
   });
   mountMenubar();
   loadUiLevel().then(function () {
-    // 表示の細かさを切り替えた直後だけ、そのレベルで最後に離れたときの配置を使う（初級は固定）。
+    // 起動時の配置: 名前つき（last）に実ドックがあればそれを使う。
+    // 空の同梱「標準」（builtin / dockview 無し）なら、レベルごとの最後の並び（getLevel）を試し、無ければ buildDefault。
+    // レベル切替直後は従来どおり getLevel を優先。メニュー「標準の配置に戻す」は resetLayout のまま（ここは通らない）。
     var switched = false;
     try {
       switched = window.sessionStorage.getItem(LEVEL_SWITCH_KEY) === '1';
       window.sessionStorage.removeItem(LEVEL_SWITCH_KEY);
     } catch (_) { switched = false; }
-    var saved = switched && uiLevel !== 'basic'
-      ? call('layout.getLevel', { level: uiLevel }).catch(function () { return null; })
-      : Promise.resolve(null);
-    return saved.then(function (got) {
-      if (got && got.ok === true && got.data && got.data.dockview) return got;
+    function hasDock(res) {
+      return !!(res && res.ok === true && res.data && res.data.dockview);
+    }
+    function tryLevel() {
+      if (uiLevel === 'basic') return Promise.resolve(null);
+      return call('layout.getLevel', { level: uiLevel }).catch(function () { return null; });
+    }
+    var first = switched && uiLevel !== 'basic' ? tryLevel() : Promise.resolve(null);
+    return first.then(function (got) {
+      if (hasDock(got)) return got;
       return refreshLayouts('').then(function (last) {
         return call('layout.get', { name: last || STR.uiMenubar29 });
+      }).then(function (named) {
+        // 実ファイルの配置（builtin ではない）だけ採用。同梱「標準」や dockview 無しはレベル配置へ。
+        if (hasDock(named) && named.builtin !== true) return named;
+        return tryLevel().then(function (lvl) {
+          if (hasDock(lvl)) return lvl;
+          return null;
+        });
       });
     });
   }).then(function (res) {
-    applyLayout(res && res.ok ? res.data : null);
+    applyLayout(res && res.ok && res.data && res.data.dockview ? res.data : null);
   }).catch(function () { applyLayout(null); }).then(function () {
+    if (typeof watchLevelLayoutPersist === 'function') watchLevelLayoutPersist();
     maybeOpenSetup(); // 配置の読み込みに失敗しても、初回の案内は出す
   });
 }

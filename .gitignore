@@ -1,6 +1,8 @@
 # 丸スト（公開リポジトリ）。秘密・利用者のデータ・作業の出力を git に入れない。
 node_modules/
 dist/
+dist-plugins/
+dist-core/
 dist-author/
 dev-state/
 plugins-author/
@@ -16,3 +18,4 @@ plugins-author/
 *_captured.json
 marust-modes.json
 *.bak
+work/

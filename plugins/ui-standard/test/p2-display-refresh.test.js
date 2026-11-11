@@ -15,7 +15,7 @@ function world(hidden) {
       addEventListener(name, fn) { this.listeners[name] = fn; }, setAttribute() {},
       appendChild() {}, insertBefore() {}, querySelector() { return element(); } };
   }
-  const roots = Object.fromEntries(['engine-status', 'emergency', 'secrets'].map(id => [id, element()]));
+  const roots = Object.fromEntries(['engine-status', 'emergency', 'secrets', 'clients', 'approvals', 'about'].map(id => [id, element()]));
   const button = element();
   roots.emergency.querySelector = id => id === '#emergency-stop' ? button : element();
   const badge = element();
@@ -52,6 +52,9 @@ function world(hidden) {
   vm.runInContext(hub.slice(0, hub.indexOf('function initDevReload')), ctx);
   vm.runInContext(fs.readFileSync(path.join(shell, 'panels/emergency.js'), 'utf8'), ctx);
   vm.runInContext(fs.readFileSync(path.join(shell, 'panels/secrets.js'), 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync(path.join(shell, 'panels/clients.js'), 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync(path.join(shell, 'panels/approvals.js'), 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync(path.join(shell, 'panels/about.js'), 'utf8'), ctx);
   async function flush() { for (let i = 0; i < 35; i++) await Promise.resolve(); }
   async function tick(ms) {
     now += ms;
@@ -120,6 +123,32 @@ async function main() {
   hidden.visibility(false); await hidden.tick(100);
   assert.strictEqual(hidden.calls.length, 4);
   hidden.dispose();
+  const admin = world(true);
+  admin.ctx.window.marustUiMetrics.start();
+  admin.ctx.initClients(); admin.ctx.initApprovals(); admin.ctx.initAbout(); admin.ctx.initOpenAtLogin();
+  await admin.tick(15000); await admin.tick(100);
+  assert.strictEqual(admin.calls.length, 0, 'hidden admin panels make no requests');
+  admin.visibility(false); await admin.tick(100);
+  assert.strictEqual(admin.calls.filter(m => m === 'hub.getState').length, 1);
+  const adminMetrics = admin.ctx.window.marustUiMetrics.snapshot();
+  assert.strictEqual(adminMetrics['clients:hub.getState'].count, 1, 'clients records its logical hub read');
+  assert.strictEqual(adminMetrics['approvals:hub.getState'].count, 1, 'approvals records its logical hub read');
+  assert.strictEqual(adminMetrics['about:hub.getState'].count, 1, 'about records its logical hub read');
+  assert.strictEqual(adminMetrics['openAtLogin:hub.getState'].count, 1, 'open-at-login records its logical hub read');
+  assert.ok(admin.calls.includes('clients.list') && admin.calls.includes('approval.list'));
+  const beforeChat = admin.calls.length;
+  admin.event('chat.message'); await admin.tick(100);
+  assert.strictEqual(admin.calls.length, beforeChat);
+  admin.event('approval.resolved'); await admin.tick(100);
+  assert.strictEqual(admin.calls.filter(m => m === 'approval.list').length, 2);
+  admin.event('approval.requested'); await admin.tick(100);
+  assert.strictEqual(admin.calls.filter(m => m === 'approval.list').length, 3);
+  admin.event('clients.changed'); await admin.tick(100);
+  assert.strictEqual(admin.calls.filter(m => m === 'clients.list').length, 2);
+  admin.dispose();
+  admin.ctx.window.marustUiMetrics.stop();
+  assert.strictEqual(admin.subscriptions.size, 0);
+  assert.strictEqual(admin.intervals.size, 0);
   console.log('P2 display refresh: sharing/burst/filter/inflight/visibility/panel/error/stop/cleanup PASS');
 }
 main().catch(err => { console.error(err); process.exitCode = 1; });

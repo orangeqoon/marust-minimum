@@ -15,6 +15,9 @@ const path = require('path');
 const { createYoutube } = require('./lib/youtube');
 const { shouldRollover, writeGuard, DEFAULT_THRESHOLD_SEC } = require('./lib/rollover');
 const oauth = require('./lib/oauth');
+const clock = require('./lib/rollover-clock');
+const PLUGIN_VERSION = require('./manifest.json').version;
+const { createRolloverHost } = require('./lib/rollover-host');
 
 const { SECRET, TOKEN_URL, REFRESH_SKEW_MS } = oauth;
 const TICK_MS = 10000;
@@ -25,7 +28,7 @@ const PENDING_TRIES = 6;
 const REFRESH_TIMEOUT_MS = 15000;
 const TEST_TITLE = '丸スト テスト枠';
 
-const DEFAULTS = Object.freeze({ streamId: '', thresholdSec: DEFAULT_THRESHOLD_SEC, titlePrefix: 'ライブ配信', defaultDescription: '' });
+const DEFAULTS = Object.freeze({ streamId: '', outputDestinationId: '', thresholdSec: DEFAULT_THRESHOLD_SEC, titlePrefix: 'ライブ配信', defaultDescription: '' });
 
 function clip(value, max) {
   return Array.from(value == null ? '' : String(value)).slice(0, max).join('');
@@ -38,6 +41,7 @@ function normalizeConfig(raw) {
   const prefix = typeof src.titlePrefix === 'string' ? src.titlePrefix.trim() : '';
   return {
     streamId: /^[A-Za-z0-9_-]{0,80}$/.test(streamId) ? streamId : '',
+    outputDestinationId: typeof src.outputDestinationId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(src.outputDestinationId) ? src.outputDestinationId : '',
     thresholdSec: Number.isInteger(sec) && sec >= 600 && sec <= 43200 ? sec : DEFAULTS.thresholdSec,
     titlePrefix: prefix ? clip(prefix, 60) : DEFAULTS.titlePrefix,
     defaultDescription: typeof src.defaultDescription === 'string' ? clip(src.defaultDescription, 5000) : ''
@@ -76,6 +80,7 @@ function createSlotYoutube(deps) {
   let ctx = null;
   let config = normalizeConfig(null);
   let usage = emptyUsage('');
+  let timing = { broadcastId: '', recordedStartMs: 0, targetId: '', targetConnectedAt: 0 };
   let memory = null; // { access_token, refresh_token, expiry_date, client_id, client_secret }
   let timer = null;
   let busy = false;
@@ -87,6 +92,12 @@ function createSlotYoutube(deps) {
     broadcastId: '',
     liveChatId: '',
     broadcastStartMs: 0, // 今の枠が始まった時刻（YouTube の actualStartTime。分からなければ 0）。12 時間の判定に使う
+    recordedStartMs: 0, // actualStartTime が取れないときに丸ストが記録した枠の開始時刻
+    targetConnectionStartMs: 0, // 上の2つが無いときの対象ターゲット接続開始時刻
+    timingSource: '',
+    clockError: '',
+    lastTimingCheckAt: 0,
+    timingReadError: '',
     pendingId: '',
     pendingTries: 0,
     pendingBound: false,
@@ -102,7 +113,11 @@ function createSlotYoutube(deps) {
   let nextRolloverAt = 0;
   let shadowNoteAt = 0;
   let extraEnsureAt = 0;
-  let mainAlerted = false; // 「メイン出力が YouTube ではない」の合図は同じ状態のあいだ 1 回だけ
+  let targetAlerted = false; // YouTube の対象配信先が無い合図は同じ状態のあいだ 1 回だけ
+  let timingVerified = false;
+  let currentLease = null;
+  let rolloverHost = null;
+  let configRevision = 0;
 
   function nowMs() {
     const n = Number(nowFn());
@@ -176,6 +191,86 @@ function createSlotYoutube(deps) {
     } else {
       usage = emptyUsage(today);
     }
+  }
+
+  function loadTiming() {
+    const file = dataFile('timing.json');
+    let saved = readJson(file);
+    view.clockError = '';
+    if (!saved) {
+      try { if (file && fs.existsSync(file)) view.clockError = 'timing-corrupt'; } catch (_) { view.clockError = 'timing-unavailable'; }
+      saved = {};
+    }
+    if (saved.schemaVersion != null && saved.schemaVersion !== 2) {
+      saved = {};
+      view.clockError = 'timing-version';
+    }
+    timing = {
+      broadcastId: typeof saved.broadcastId === 'string' ? saved.broadcastId : '',
+      recordedStartMs: clock.validStartMs(saved.recordedStartMs, nowMs()) ? Number(saved.recordedStartMs) : 0,
+      source: saved.source === clock.SOURCES.ACTUAL ? clock.SOURCES.ACTUAL : clock.SOURCES.LOCAL,
+      streamId: typeof saved.streamId === 'string' ? saved.streamId : '',
+      targetId: '',
+      targetConnectedAt: 0
+    };
+    // 旧targetConnectedAtは初回観測時刻のため、実接続開始として移行しない。
+    if (saved.recordedStartMs && !timing.recordedStartMs) view.clockError = 'invalid-start';
+    view.recordedStartMs = timing.recordedStartMs;
+    view.targetConnectionStartMs = 0;
+  }
+
+  function saveTiming() {
+    const file = dataFile('timing.json');
+    const tmp = file + '.tmp';
+    try {
+      if (!file) throw new Error('no-data-dir');
+      const next = Object.assign({}, timing, {
+        schemaVersion: 2,
+        thresholdSec: config.thresholdSec,
+        deadlineAtMs: clock.deadlineAt(timing.recordedStartMs, config.thresholdSec)
+      });
+      fs.writeFileSync(tmp, JSON.stringify(next), { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(tmp, file);
+      view.clockError = '';
+      return true;
+    } catch (_) {
+      try { fs.unlinkSync(tmp); } catch (_) { /* 既存正常版は置換していない */ }
+      view.clockError = 'timing-save-failed';
+      return false;
+    }
+  }
+
+  function rememberTiming(patch) {
+    const next = Object.assign({}, timing, patch || {});
+    const changed = JSON.stringify(next) !== JSON.stringify(timing);
+    timing = next;
+    view.recordedStartMs = timing.recordedStartMs;
+    view.targetConnectionStartMs = timing.targetConnectedAt;
+    return changed || view.clockError === 'timing-save-failed' ? saveTiming() : true;
+  }
+
+  function rememberStart(startMs, source) {
+    if (!clock.validStartMs(startMs, nowMs())) {
+      if (!timing.recordedStartMs) view.clockError = 'invalid-start';
+      return false;
+    }
+    view.broadcastStartMs = source === clock.SOURCES.ACTUAL ? startMs : 0;
+    return rememberTiming({ broadcastId: view.broadcastId, recordedStartMs: startMs, source: source });
+  }
+
+  async function recoverTiming() {
+    // 枠とstreamの双方を特定できるときだけ公式の実開始時刻を読む。
+    const broadcastId = view.broadcastId || timing.broadcastId;
+    const streamId = config.streamId || timing.streamId;
+    if (!broadcastId || !streamId) { view.timingReadError = 'stream-not-configured'; return false; }
+    const out = await youtube().readBroadcastTiming({ broadcastId: broadcastId, streamId: streamId });
+    view.lastTimingCheckAt = nowMs();
+    view.timingReadError = out.ok ? (out.live ? '' : 'broadcast-not-live') : out.code;
+    if (out.ok && out.live && out.actualStartMs > 0) {
+      if (!view.broadcastId) adopt(out.broadcastId, '', 'reused');
+      rememberStart(out.actualStartMs, clock.SOURCES.ACTUAL);
+    }
+    return out.ok && out.live;
   }
 
   function rollUsageDay() {
@@ -266,12 +361,14 @@ function createSlotYoutube(deps) {
 
   function youtube() {
     if (!yt) {
+      const ownedContext = ctx;
       yt = createYoutube({
         fetch: fetchImpl,
         getAccessToken: getAccessToken,
         now: nowMs,
         sleep: sleepFn,
         onCost: addCost,
+        canWrite: () => ctx === ownedContext && modeOf() === 'live' && (!currentLease || currentLease.isCurrent()),
         log: (level, message) => log(level, 'yt ' + message),
         titlePrefix: config.titlePrefix,
         defaultDescription: config.defaultDescription
@@ -327,6 +424,12 @@ function createSlotYoutube(deps) {
     view.liveChatId = liveChatId || view.liveChatId;
     if (previous === broadcastId) return;
     view.broadcastStartMs = 0; // 別の枠になった。始まりの時刻は呼んだ側が入れ直す
+    if (timing.broadcastId !== broadcastId) {
+      timing = { broadcastId: broadcastId, recordedStartMs: 0, source: clock.SOURCES.LOCAL, streamId: timing.streamId || config.streamId || '', targetId: '', targetConnectedAt: 0 };
+      view.recordedStartMs = 0;
+      view.targetConnectionStartMs = 0;
+      saveTiming();
+    }
     view.broadcastId = broadcastId;
     view.liveChatId = liveChatId || '';
     const payload = { site: 'youtube', broadcastId: broadcastId, liveChatId: view.liveChatId, reason: reason || 'reused', at: iso() };
@@ -349,6 +452,7 @@ function createSlotYoutube(deps) {
   }
 
   async function ensure(mode) {
+    timingVerified = false;
     const client = youtube();
     if (mode !== 'live') {
       const listed = await client.listActive();
@@ -363,7 +467,7 @@ function createSlotYoutube(deps) {
       return undefined;
     }
     const out = await client.ensureBroadcast({
-      streamId: config.streamId,
+      streamId: config.streamId || timing.streamId,
       allowCreate: createGate,
       resume: view.pendingId ? { id: view.pendingId } : undefined,
       onCreated: (made) => { countCreated(made.id); view.pendingBound = false; }
@@ -377,18 +481,47 @@ function createSlotYoutube(deps) {
         view.pendingId = out.newId; // 作ったあとの失敗。次の確認はこの枠を使い、作り直さない
         view.pendingBound = out.bound === true;
       }
+      await recoverTiming();
       return fault(out.code);
     }
     healthy();
+    timingVerified = true;
     if (!out.created && !out.adopted) {
+      const streamId = config.streamId || timing.streamId || out.streamId;
+      if (!streamId || (out.streamId && out.streamId !== streamId)) {
+        timingVerified = false;
+        view.timingReadError = 'stream-mismatch';
+        note('timing-unverified');
+        return;
+      }
+      if (!out.streamId) {
+        const checked = await client.readBroadcastTiming({ broadcastId: out.broadcastId, streamId: streamId });
+        if (!checked.ok || !checked.live) {
+          timingVerified = false;
+          view.timingReadError = checked.ok ? 'broadcast-not-live' : checked.code;
+          note('timing-unverified');
+          return;
+        }
+        out.actualStartMs = checked.actualStartMs;
+      }
       adopt(out.broadcastId, out.liveChatId, 'reused');
-      if (out.actualStartMs > 0) view.broadcastStartMs = out.actualStartMs;
+      rememberTiming({ streamId: streamId });
+      if (out.actualStartMs > 0) {
+        rememberStart(out.actualStartMs, clock.SOURCES.ACTUAL);
+        view.timingReadError = '';
+        view.lastTimingCheckAt = nowMs();
+      } else if (timing.broadcastId === out.broadcastId && timing.recordedStartMs > 0) {
+        view.timingSource = 'recordedStart';
+      }
+      if (!(out.actualStartMs > 0)) timingVerified = await recoverTiming();
       view.pendingId = '';
       note('reused');
       return undefined;
     }
     adopt(out.broadcastId, out.liveChatId, out.created ? 'created' : 'reused');
-    if (out.live) view.broadcastStartMs = nowMs();
+    if (out.live) {
+      rememberStart(nowMs(), clock.SOURCES.LOCAL);
+    }
     if (out.live) {
       view.pendingId = '';
       note(out.created ? 'created' : 'reused');
@@ -407,7 +540,7 @@ function createSlotYoutube(deps) {
     const out = await youtube().goLive(view.pendingId);
     if (out.ok) {
       view.pendingId = '';
-      view.broadcastStartMs = nowMs();
+      rememberStart(nowMs(), clock.SOURCES.LOCAL);
       healthy();
       note('created');
       return;
@@ -424,151 +557,124 @@ function createSlotYoutube(deps) {
     return undefined;
   }
 
-  function obsControlFor(obs) {
-    return {
-      check: () => obs.streamControl({ action: 'check' }),
-      isStreaming: async () => {
-        const st = await obs.getStreamStatus();
-        if (!st) throw new Error('obs-unreachable'); // 状態が分からないときは「止まっている」とみなさない
-        return st.outputActive === true;
-      },
-      stop: () => obs.streamControl({ action: 'stop' }),
-      start: () => obs.streamControl({ action: 'start' })
-    };
-  }
-
-  // 配信先 obs-main（メイン出力）が使う設定で、サイトが youtube か。読めないときは false。
-  function mainIsYoutube() {
+  function youtubeDestination() {
     try {
-      if (!ctx || !ctx.destinations || typeof ctx.destinations.list !== 'function') return false;
-      const res = ctx.destinations.list();
-      if (!res || res.ok !== true || !Array.isArray(res.destinations)) return false;
-      const row = res.destinations.find((d) => d && d.id === 'obs-main');
-      return !!row && row.enabled === true && row.site === 'youtube';
-    } catch (_) {
-      return false;
-    }
+      if (!ctx || !config.outputDestinationId || !ctx.destinations) return null;
+      const list = ctx.destinations.list();
+      if (!list || !list.ok || !Array.isArray(list.destinations)) return null;
+      const matches = list.destinations.filter(row => row && row.enabled === true && row.site === 'youtube' && row.id === config.outputDestinationId);
+      return matches.length === 1 ? matches[0] : null;
+    } catch (_) { return null; }
   }
 
-  async function rollover(mode, elapsedSec) {
-    if (mode !== 'live') {
-      if (nowMs() - shadowNoteAt >= 30 * 60 * 1000) {
-        shadowNoteAt = nowMs();
-        note('shadow-would-switch');
-      }
-      return;
-    }
-    // 切り替えは OBS のメイン出力を止めて出し直す。メイン出力が「使う」でサイト youtube と選ばれているときだけ動かす（未選択を YouTube とはみなさない）。
-    if (!mainIsYoutube()) {
-      nextRolloverAt = nowMs() + ROLLOVER_RETRY_MS;
-      note('main-not-youtube');
-      if (!mainAlerted) {
-        mainAlerted = true;
-        publish(ctx.events.NAMES.SITE_TROUBLE, { site: 'youtube', job: 'slot', kind: 'failed', code: 'main-not-youtube', at: iso() });
-      }
-      return;
-    }
-    mainAlerted = false;
+  function journalHost() {
+    if (!rolloverHost) rolloverHost = createRolloverHost({
+      getContext: () => ctx, getClient: youtube, getDestination: youtubeDestination,
+      getStreamId: () => config.streamId || timing.streamId,
+      getBroadcastId: () => view.broadcastId || timing.broadcastId, now: nowMs,
+      onAttempt: () => { usage.switches += 1; saveUsage(); },
+      onCreated: () => countCreated('')
+    });
+    return rolloverHost;
+  }
+
+  function blocked(code) { note(code); return { ok: false, error: code, code }; }
+
+  async function rollover(mode, elapsedSec, lease, options) {
+    if (mode !== 'live') { note('shadow-would-switch'); return { ok: true, dryRun: true }; }
+    const pending = journalHost().status();
+    if (pending.error) return blocked(pending.error);
+    if (!pending.pending && view.clockError === 'timing-save-failed') return blocked('timing-save-failed');
+    if (!pending.pending && !timingVerified) return blocked('timing-unverified');
+    if (!youtubeDestination()) return blocked('output-not-configured');
+    if (!ctx.outputs || !ctx.operations) return blocked('host-update-required');
     rollUsageDay();
-    const gate = writeGuard({ kind: 'switch', usage: usage, now: nowMs() });
-    if (!gate.ok) {
-      nextRolloverAt = nowMs() + ROLLOVER_RETRY_MS;
-      note('blocked-' + gate.reason);
-      return;
+    if (!pending.pending) {
+      const gate = writeGuard({ kind: 'switch', usage, now: nowMs() });
+      if (!gate.ok) return blocked('blocked-' + gate.reason);
     }
-    if (!ctx.obs || typeof ctx.obs.streamControl !== 'function') {
-      nextRolloverAt = nowMs() + ROLLOVER_RETRY_MS;
-      note('no-obs-control');
-      return;
-    }
-    log('info', 'youtube rollover start');
+    const ownedContext = ctx;
     publish(ctx.events.NAMES.SLOT_SWITCHING, { site: 'youtube', phase: 'start', at: iso() });
-    let out;
-    try {
-      out = await runSwitch();
-    } finally {
-      publish(ctx.events.NAMES.SLOT_SWITCHING, { site: 'youtube', phase: 'end', at: iso() });
+    let result;
+    try { result = await journalHost().run(options || {}, lease); }
+    finally {
+      if (ctx === ownedContext && (!lease || lease.isCurrent())) publish(ctx.events.NAMES.SLOT_SWITCHING, { site: 'youtube', phase: 'end', at: iso() });
     }
-    return afterSwitch(out);
+    if (ctx !== ownedContext || (lease && !lease.isCurrent())) return { ok: false, error: 'retired' };
+    nextRolloverAt = nowMs() + (result.code === 'waiting-live' ? 30000 : ROLLOVER_RETRY_MS);
+    if (result.ok) {
+      healthy(); view.pendingId = ''; view.prepared = null;
+      adopt(result.newId, '', 'switched');
+      rememberStart(result.actualStartMs, clock.SOURCES.ACTUAL);
+      timingVerified = true; lastEnsureAt = nowMs(); nextRolloverAt = 0;
+      note('switched');
+    } else {
+      view.error = result.code || 'rollover-failed';
+      note(result.code === 'waiting-live' ? 'switched-waiting-live' : view.error);
+    }
+    return result;
   }
 
-  function runSwitch() {
-    return youtube().switchStream({
-      streamId: config.streamId,
-      obs: obsControlFor(ctx.obs),
-      prepared: view.prepared || undefined,
-      onAttempt: () => {
-        rollUsageDay();
-        usage.switches += 1; // 試行を数える（成功だけでなく）。失敗の繰り返しで枠が増えないように
-        saveUsage();
-      },
-      onCreated: (made) => {
-        view.prepared = { id: made.id, liveChatId: made.liveChatId, bound: false };
-        countCreated('');
-      }
+  function timingElapsedSec(destination) {
+    const current = timingClock();
+    view.timingSource = current.ok ? (current.source === clock.SOURCES.ACTUAL ? 'actualStartTime' : 'recordedStart') : '';
+    return current.elapsedSec;
+  }
+
+  function timingClock() {
+    return clock.buildClock({ nowMs: nowMs(), startedAtMs: (!view.broadcastId || timing.broadcastId === view.broadcastId) ? timing.recordedStartMs : 0, source: timing.source, thresholdSec: config.thresholdSec });
+  }
+
+  async function resumeRollover(params) {
+    if (!params || params.confirmed !== true) return { ok: false, error: 'confirm' };
+    if (!ctx || modeOf() !== 'live') return { ok: false, error: 'not-live' };
+    if (!ctx.operations || typeof ctx.operations.run !== 'function') return { ok: false, error: 'host-update-required' };
+    return ctx.operations.run(async lease => {
+      const pending = journalHost().status();
+      if (pending.error) return { ok: false, error: pending.error };
+      if (!pending.pending) return { ok: false, error: 'no-pending-operation' };
+      if (typeof params.operationId !== 'string' || params.operationId !== pending.id) return { ok: false, error: 'stale-operation' };
+      const revision = configRevision;
+      currentLease = { isCurrent: () => lease.isCurrent() && revision === configRevision };
+      try { return await rollover('live', 0, currentLease, { restartConfirmed: true }); }
+      finally { currentLease = null; }
     });
   }
 
-  function afterSwitch(out) {
-    nextRolloverAt = nowMs() + ROLLOVER_RETRY_MS;
-    if (out.ok) {
-      healthy();
-      view.pendingId = '';
-      view.prepared = null;
-      adopt(out.newId, out.liveChatId, 'switched');
-      view.broadcastStartMs = nowMs();
-      lastEnsureAt = nowMs();
-      nextRolloverAt = 0;
-      note('switched');
-      return;
-    }
-    if (out.newId) view.prepared = { id: out.newId, liveChatId: out.liveChatId || '', bound: out.bound === true };
-    if (out.code === 'obs-restart-failed' || out.code === 'obs-restart-skipped') {
-      // 旧枠は閉じた。新枠が今の枠（OBS が戻れば自動で始まる）
-      view.prepared = null;
-      adopt(out.newId, out.liveChatId, 'switched');
-      if (out.code === 'obs-restart-skipped') {
-        note('restart-skipped');
-        log('info', 'youtube obs restart skipped (human stop)');
-        return;
-      }
-      view.error = out.code;
-      note(out.code);
-      log('error', 'youtube obs restart failed');
-      publish(ctx.events.NAMES.SITE_TROUBLE, { site: 'youtube', job: 'slot', kind: 'failed', code: out.code, at: iso() });
-      return;
-    }
-    if (out.code === 'login-expired' || out.code === 'quota') return fault(out.code);
-    view.error = out.code;
-    note(out.code);
-    log('warn', 'youtube rollover ' + out.code);
+  async function tick() {
+    if (!ctx || busy || modeOf() === 'legacy') return;
+    if (modeOf() !== 'live') return tickInner({ isCurrent: () => !!ctx });
+    if (!ctx.operations || typeof ctx.operations.run !== 'function') return blocked('host-update-required');
+    return ctx.operations.run(lease => {
+      const revision = configRevision;
+      return tickInner({ isCurrent: () => lease.isCurrent() && revision === configRevision });
+    });
   }
 
-  async function tick() {
+  async function tickInner(lease) {
     if (!ctx || busy) return;
     const mode = modeOf();
     if (mode === 'legacy') return;
     busy = true;
+    currentLease = lease;
     try {
+      const recovery = journalHost().status();
+      if (recovery.error) return blocked(recovery.error);
+      if (!config.outputDestinationId) return blocked('output-not-configured');
+      if (recovery.pending) {
+        if (nowMs() >= nextRolloverAt) await rollover(mode, 0, lease);
+        return;
+      }
+      const destination = youtubeDestination();
+      if (!destination) return blocked('output-not-configured');
       const obs = ctx.obs;
-      if (!obs || typeof obs.getStreamStatus !== 'function') {
-        view.obs = { reachable: false, streaming: false, elapsedSec: 0 };
-        return;
-      }
-      const st = await obs.getStreamStatus();
-      if (!st) {
-        view.obs = { reachable: false, streaming: false, elapsedSec: 0 };
-        return;
-      }
-      const active = st.outputActive === true;
-      const duration = Number(st.outputDuration);
-      const elapsedSec = active && Number.isFinite(duration) && duration > 0 ? duration / 1000 : 0;
-      view.obs = { reachable: true, streaming: active, elapsedSec: Math.floor(elapsedSec) };
-      if (!active) {
-        wasActive = false;
-        view.pendingId = '';
-        return;
-      }
+      const st = obs && typeof obs.getStreamStatus === 'function' ? await obs.getStreamStatus() : null;
+      if (!lease.isCurrent()) return;
+      const mainActive = !!(st && st.outputActive === true);
+      const duration = st ? Number(st.outputDuration) : 0;
+      view.obs = { reachable: !!st, streaming: mainActive, elapsedSec: Number.isFinite(duration) ? Math.floor(duration / 1000) : 0 };
+      const active = destination.id === 'obs-main' ? mainActive : ['live', 'connecting', 'reconnecting'].includes(destination.actual && destination.actual.engineState);
+      if (!active) { wasActive = false; return; }
       if (!wasActive) {
         wasActive = true;
         lastEnsureAt = 0;
@@ -581,17 +687,20 @@ function createSlotYoutube(deps) {
         lastEnsureAt = nowMs();
         if (extraDue) extraEnsureAt = 0;
         await ensure(mode);
+        if (!lease.isCurrent()) return;
       }
-      // OBS の経過時間（OBS を止めると 0 に戻る）と、枠が始まってからの時間の長い方で判定する
-      const byBroadcastSec = view.broadcastStartMs > 0 ? Math.max(0, (nowMs() - view.broadcastStartMs) / 1000) : 0;
-      if (shouldRollover({ elapsedSec: Math.max(elapsedSec, byBroadcastSec), thresholdSec: config.thresholdSec }) && nowMs() >= nextRolloverAt) {
-        await rollover(mode, elapsedSec);
+      // 実開始時刻または同一枠の保存済み時刻だけで判定する。
+      // OBS 全体の経過時間は、YouTube の枠切り替え判定には使わない。
+      const youtubeElapsedSec = timingElapsedSec();
+      if (shouldRollover({ elapsedSec: youtubeElapsedSec, thresholdSec: config.thresholdSec }) && nowMs() >= nextRolloverAt) {
+        await rollover(mode, youtubeElapsedSec, lease);
       }
-    } catch (_) {
+    } catch (err) {
       view.error = 'failed';
-      log('warn', 'youtube tick failed');
+      log('warn', 'youtube tick failed: ' + (err && err.message ? err.message : 'unknown'));
     } finally {
       busy = false;
+      currentLease = null;
     }
   }
 
@@ -635,13 +744,33 @@ function createSlotYoutube(deps) {
       }
     }
     rollUsageDay();
+    const currentClock = timingClock();
+    let outputDestinations = [];
+    try {
+      const listed = ctx && ctx.destinations && ctx.destinations.list();
+      if (listed && listed.ok && Array.isArray(listed.destinations)) outputDestinations = listed.destinations.filter(row => row && row.enabled && row.site === 'youtube').map(row => ({ id: row.id, label: row.id, main: row.id === 'obs-main', active: ['live', 'connecting', 'reconnecting'].includes(row.actual && row.actual.engineState) }));
+    } catch (_) { /* 選択値を自動で変えない */ }
     return {
       ok: true,
       mode: modeOf(passed),
       lastOp: view.lastOp,
       lastOpAt: view.lastOpAt,
-      broadcastId: view.broadcastId,
+      broadcastId: view.broadcastId || timing.broadcastId,
       liveChatId: view.liveChatId,
+      timingSource: view.timingSource,
+      deadlineAtMs: currentClock.deadlineAtMs,
+      remainingSec: currentClock.remainingSec == null ? null : Math.max(0, currentClock.remainingSec),
+      overdueSec: currentClock.remainingSec == null ? null : Math.max(0, -currentClock.remainingSec),
+      clockError: view.clockError || currentClock.error,
+      timingReadError: view.timingReadError,
+      lastTimingCheckAt: view.lastTimingCheckAt,
+      timingVerified: timingVerified,
+      pluginVersion: PLUGIN_VERSION,
+      outputDestinations,
+      rollover: ctx ? journalHost().status() : { pending: false, phase: '', oldId: '', newId: '' },
+      broadcastStartMs: view.broadcastStartMs,
+      recordedStartMs: view.recordedStartMs,
+      targetConnectionStartMs: view.targetConnectionStartMs,
       waitingLive: !!view.pendingId,
       needsLogin: view.needsLogin,
       error: view.error,
@@ -659,12 +788,25 @@ function createSlotYoutube(deps) {
     const saved = box && box.dataDir ? writeJson(path.join(box.dataDir, 'config.json'), next) : false;
     if (!saved) return { ok: false, error: 'unavailable' };
     config = next;
+    configRevision += 1;
+    if (timing.recordedStartMs > 0 && !saveTiming()) return { ok: false, error: 'timing-save-failed' };
     resetClient();
     return { ok: true, config: Object.assign({}, config) };
   }
 
   /** 画面の「テスト枠を作る」: 非公開の枠を 1 つ作ってストリームへ結ぶだけ（live にはしない）。押したときだけ本物に書く。 */
   async function createTestSlot(params, passed) {
+    if (!params || params.confirmed !== true) return { ok: false, error: 'confirm' };
+    if (!ctx || !ctx.operations) return { ok: false, error: 'host-update-required' };
+    return ctx.operations.run(async lease => {
+      const revision = configRevision;
+      currentLease = { isCurrent: () => lease.isCurrent() && revision === configRevision };
+      try { return await createTestSlotInner(params, passed); }
+      finally { currentLease = null; }
+    });
+  }
+
+  async function createTestSlotInner(params, passed) {
     const box = passed || ctx;
     if (!params || params.confirmed !== true) return { ok: false, error: 'confirm' };
     if (modeOf(box) !== 'live') return { ok: false, error: 'not-live' };
@@ -689,6 +831,7 @@ function createSlotYoutube(deps) {
     ctx = passed || null;
     loadConfig();
     loadUsage();
+    loadTiming();
     resetClient();
   }
 
@@ -718,7 +861,7 @@ function createSlotYoutube(deps) {
     load, start, stop, destroy, health,
     tick,
     prepareBroadcast, verifyLive, endBroadcast,
-    actions: { getStatus: getStatus, setConfig: setConfig, createTestSlot: createTestSlot }
+    actions: { getStatus: getStatus, setConfig: setConfig, createTestSlot: createTestSlot, resumeRollover }
   };
 }
 

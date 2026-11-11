@@ -65,7 +65,7 @@ form {
   align-items: start;
 }
 
-input, textarea {
+input, select, textarea {
   background: #1b2130;
   color: inherit;
   border: 1px solid #39425a;

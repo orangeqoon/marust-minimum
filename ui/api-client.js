@@ -10,12 +10,18 @@
   var nextId = 1;
   var pending = new Map();
   var reconnectTimer = null;
+  var lastStatus = null;
 
   function setStatus(text, ok) {
+    lastStatus = { text: text, ok: ok };
+    refreshStatus();
+  }
+
+  function refreshStatus() {
     var el = document.getElementById('connection-status');
-    if (!el) return;
-    el.textContent = text;
-    el.className = ok ? 'ok' : 'wait';
+    if (!el || !lastStatus) return;
+    el.textContent = lastStatus.text;
+    el.className = lastStatus.ok ? 'ok' : 'wait';
   }
 
   function failPending(err) {
@@ -133,7 +139,7 @@
     };
   }
 
-  global.marustApi = { call: call, subscribe: subscribe };
+  global.marustApi = { call: call, subscribe: subscribe, refreshStatus: refreshStatus };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', connect);
   else connect();
 })(window);

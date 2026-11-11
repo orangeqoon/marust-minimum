@@ -25,7 +25,7 @@ async function test(name, fn) {
 (async () => {
   await test('言葉は strings.js にある（V4-2・V4-3）', () => {
     assert.strictEqual(STR.backupOff, undefined, '使われない言葉は消した（S6。backup の画面が自分の言葉を持つ）');
-    assert.strictEqual(STR.gcalNoPlugin, 'カレンダーのプラグインが入っていません。');
+    assert.strictEqual(STR.gcalNoPlugin, 'Google カレンダーが未導入です。追加して丸ストを再起動してください。');
     assert.strictEqual(STR.uiMenubar49, 'バックアップと引っ越し…', 'メニューの名前は直さない');
   });
 
@@ -39,11 +39,11 @@ async function test(name, fn) {
     assert.ok(!read('plugins/ui-standard/shell/core/dock.js').includes('refreshBackupPart'));
   });
 
-  await test('メニュー: calendar.loginStatus が unknown-method なら 1 行だけ（鍵の欄・ボタン・説明リンクを隠す）。それ以外は今どおり', () => {
+  await test('メニュー: calendar.loginStatus が unknown-method なら 1 行だけ（ログインボタン・金庫リンク・説明リンクを隠す）。それ以外は今どおり', () => {
     const src = read('plugins/ui-standard/shell/menubar.js');
     assert.ok(src.includes("if (st && st.ok === false && st.error === 'unknown-method') { paintNoPlugin(); return; }"));
     const fn = src.slice(src.indexOf('function paintNoPlugin()'), src.indexOf('function showLinkParts()'));
-    ['linkState.textContent = STR.gcalNoPlugin', "form.style.display = 'none'", "loginBtn.style.display = 'none'", "rekeyBtn.style.display = 'none'", "guideP.style.display = 'none'"].forEach((t) => assert.ok(fn.indexOf(t) !== -1, t));
+    ['linkState.textContent = STR.gcalNoPlugin', "loginBtn.style.display = 'none'", "vaultP.style.display = 'none'", "guideP.style.display = 'none'"].forEach((t) => assert.ok(fn.indexOf(t) !== -1, t));
     assert.ok(src.indexOf('showLinkParts();') > src.indexOf("paintNoPlugin(); return; }"), '戻ったら出し直す');
   });
 

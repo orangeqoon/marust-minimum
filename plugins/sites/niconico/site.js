@@ -201,6 +201,14 @@ function createSiteNiconico(deps) {
       headers: headers(session, true),
       body: JSON.stringify({ title: title })
     });
+    // 成功応答だけでは反映を保証できない。取得できない時は未確認にする。
+    try {
+      const check = parseJson(await call('https://live2.nicovideo.jp/unama/api/v2/programs/' + programId, {
+        method: 'GET', headers: headers(session, false)
+      }));
+      const observed = check && check.data && check.data.title;
+      return typeof observed === 'string' ? observed === title : null;
+    } catch (_) { return null; }
   }
 
   async function runUpdate(input, meta) {
@@ -224,10 +232,11 @@ function createSiteNiconico(deps) {
       return { ok: true, dryRun: true };
     }
     try {
-      await perform(auth.session, title);
+      const verified = await perform(auth.session, title);
+      if (verified === false) { note(false, '', true); return { ok: false, error: 'title-not-reflected' }; }
       note(true, title, true);
-      log('updated');
-      return { ok: true };
+      log(verified === true ? 'updated' : 'updated-unverified');
+      return verified === true ? { ok: true, verified: true } : { ok: true, verified: false };
     } catch (err) {
       const code = err && CODE_RE.test(err.code) ? err.code : 'http';
       note(false, '', code === 'not-live' ? false : null);

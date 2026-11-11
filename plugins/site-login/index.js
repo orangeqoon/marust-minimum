@@ -3,9 +3,9 @@
 /**
  * サイトのログイン（K3 で host/site-login.js・host/oauth-reauth.js から出した）。
  *  - 状態（none / keys-only / logged-in / expired / incomplete）・アプリの鍵の保存（client_id・client_secret・戻り先）・ブラウザでの結び直し。
- *  - 読み書きできる秘密は manifest で宣言した 4 つの OAuth（youtube・google・twitch・kick の .oauth）だけ。サイトの設定欄（<site>.config）と cookie・config の有無は核（host/core/site-config.js）。
+ *  - 読み書きできる秘密は manifest で宣言した 4 つの OAuth（youtube・google・twitch・kick の .oauth）だけ。サイト用鍵は sites.setOAuthApp、カレンダー用は calendar.setOAuthApp（google.oauth 専用）。サイトの設定欄（<site>.config）と cookie・config の有無は核（host/core/site-config.js）。
  *  - ブラウザを開くのは核の口 ctx.external.open（https・manifest の external.hosts だけ）。戻りの待ち受けは自分の中（127.0.0.1 / localhost の一時的な待ち受け）。
- *  - API sites.loginStatus（read・ウィンドウだけ）・sites.setOAuthApp・auth.reauth（write・ウィンドウだけ）。名前・引数・権限は移す前と同じ。値は返さない。
+ *  - API sites.loginStatus（read・ウィンドウだけ）・sites.setOAuthApp（サイト用）・calendar.setOAuthApp（Google カレンダー用）・auth.reauth（write・ウィンドウだけ）。値は返さない。
  */
 
 const { createSiteLogin } = require('./lib/login');
@@ -63,9 +63,19 @@ module.exports = {
     ctx.api.register('sites.setOAuthApp', (params) => login.setOAuthApp(params), {
       access: 'write',
       windowOnly: true,
-      description: 'YouTube・Twitch・Kick のログイン用の鍵（client_id・client_secret・戻り先）を金庫に保存する。値は返さない。ウィンドウだけ',
+      description: 'YouTube・Twitch・Kick 用の鍵を各サイトの金庫へ保存（google.oauth には書かない）。値は返さない',
       params: {
-        site: { type: 'string', required: true, max: 16, enum: ['youtube', 'twitch', 'kick', 'google'], error: 'unknown-site' },
+        site: { type: 'string', required: true, max: 16, enum: ['youtube', 'twitch', 'kick'], error: 'unknown-site' },
+        clientId: { type: 'string', required: true, max: 2000, typeError: 'bad-client-id', lengthError: 'bad-client-id' },
+        clientSecret: { type: 'string', required: true, max: 2000, typeError: 'bad-client-secret', lengthError: 'bad-client-secret' },
+        redirectUri: { type: 'string', required: false, max: 200, typeError: 'bad-redirect', lengthError: 'bad-redirect' }
+      }
+    });
+    ctx.api.register('calendar.setOAuthApp', (params) => login.setCalendarOAuthApp(params), {
+      access: 'write',
+      windowOnly: true,
+      description: 'Google カレンダー専用の鍵を google.oauth へ保存（サイト用の金庫には書かない）。値は返さない',
+      params: {
         clientId: { type: 'string', required: true, max: 2000, typeError: 'bad-client-id', lengthError: 'bad-client-id' },
         clientSecret: { type: 'string', required: true, max: 2000, typeError: 'bad-client-secret', lengthError: 'bad-client-secret' },
         redirectUri: { type: 'string', required: false, max: 200, typeError: 'bad-redirect', lengthError: 'bad-redirect' }

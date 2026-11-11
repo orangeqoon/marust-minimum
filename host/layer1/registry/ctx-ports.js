@@ -27,8 +27,10 @@ const CTX_PORTS = Object.freeze([
   Object.freeze({ name: 'overlay', prop: 'overlay', what: 'オーバーレイへ値を出す' }),
   Object.freeze({ name: 'chat', prop: 'chat', what: 'コメントの取り込みと入り口の宣言' }),
   Object.freeze({ name: 'destinations', prop: 'destinations', what: '配信先の一覧と集計' }),
+  Object.freeze({ name: 'operations.exclusive', prop: 'operations', method: 'run', optIn: true, what: '自分のプラグインの世代をまたぐ排他実行' }),
   Object.freeze({ name: 'obs.read', prop: 'obs', methods: ['getStreamStatus', 'isStreaming'], what: 'OBS の配信状態を読む' }),
   Object.freeze({ name: 'obs.streamControl', prop: 'obs', method: 'streamControl', what: '配信全体の開始・停止' }),
+  Object.freeze({ name: 'obs.outputControl', prop: 'outputs', optIn: true, what: '確認済みの配信先だけを検査・開始・停止する' }),
   Object.freeze({ name: 'api.register', prop: 'api', method: 'register', what: '窓口にメソッドを足す' }),
   Object.freeze({ name: 'api.call', prop: 'api', method: 'call', what: '窓口のメソッドを呼ぶ' }),
   Object.freeze({ name: 'peers', prop: 'peers', what: 'ほかのプラグインの決まったメソッド' }),
@@ -84,6 +86,7 @@ function gateCtx(ctx, options) {
     if (!name || declared.has(name)) return;
     const port = CTX_PORTS.find((row) => row.name === name);
     if (port && port.always) return;
+    if (port && port.optIn) throw needsError(name);
     if (!strict) {
       if (warned.has(name)) return;
       warned.add(name);

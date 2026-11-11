@@ -146,7 +146,14 @@ function createChatSend(options) {
     return { ok: true, results: results };
   }
 
-  return { send: send };
+  function status() {
+    let rows;
+    try { rows = peers && typeof peers.list === 'function' ? peers.list() : []; } catch (_) { rows = []; }
+    return { ok: true, sinks: (Array.isArray(rows) ? rows : []).filter(function(row) {
+      return row && /^sink-[a-z0-9-]+$/.test(row.id) && Array.isArray(row.provides) && row.provides.includes('chat.sink@1');
+    }).map(function(row) { return { site: row.id.slice(5), mode: row.mode }; }) };
+  }
+  return { send: send, status: status };
 }
 
 module.exports = {

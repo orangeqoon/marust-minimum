@@ -214,7 +214,7 @@ function initSiteAdd() {
     }).then(function (res) { say(res && res.ok === false ? STR.addSiteErr(res.error) : STR.addSiteDone); }).catch(function () { say(STR.addSiteErr('failed')); });
   });
   load();
-  setInterval(function () { if (root.offsetParent) load(); }, 30000);
+  setInterval(function () { if (root.offsetParent && !document.hidden) load(); }, 30000);
 }
 
 registerPanel('site-add', initSiteAdd);

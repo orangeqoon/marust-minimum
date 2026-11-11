@@ -9,7 +9,7 @@
     "題名",
     "カテゴリ"
   ],
-  "version": "1.0.0",
+  "version": "1.0.1",
   "tier": "standard",
   "manifestVersion": 2,
   "runtime": "inproc",
@@ -38,6 +38,7 @@
         "metadata"
       ],
       "dock": [
+        "standard",
         "advanced"
       ],
       "dockOrder": 10,
@@ -54,7 +55,8 @@
       "hub.fanout",
       "favorites.add",
       "favorites.remove",
-      "favorites.merge"
+      "favorites.merge",
+      "auth.reauth"
     ]
   },
   "defaultMode": "legacy",

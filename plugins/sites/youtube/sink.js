@@ -65,8 +65,11 @@ function allowedUrl(value) {
 }
 
 function listUrl(kind) {
+  // 配信枠は認証済みユーザー自身のものだけを探す。mine=true が無いと
+  // active/upcoming の問い合わせが 400 になったり、他人の枠を見て
+  // liveChatId を取得できないことがある（旧 MultiCommenter も同じ条件）。
   if (kind === 'mine') return LIST_ROOT + '?part=snippet&mine=true&maxResults=5';
-  return LIST_ROOT + '?part=snippet&broadcastStatus=' + kind + '&broadcastType=all&maxResults=5';
+  return LIST_ROOT + '?part=snippet&broadcastStatus=' + kind + '&mine=true&maxResults=5';
 }
 
 function createSinkYoutube(deps) {

@@ -1,5 +1,7 @@
 'use strict';
 
+const { WINDOW_ID } = require('../../../core');
+
 /**
  * api の名前空間 plugins（計画 X・S8a。host/core/api.js から機械的に移した。動きは変えていない）。
  * specs は params・権限の定義、runs(S) は実装。S は host/core/api/index.js の createApi の中の道具（同じ名前で受ける）。
@@ -15,9 +17,8 @@ const specs = {
   },
   'plugins.reloadAll': {
     permission: 'write',
-    devOnly: true,
     noApproval: true,
-    description: '読み直せるプラグインを全部読み直す。開発者モードだけ。配信中は、OBS を握る自動枠取りのプラグインだけ飛ばす（skip / streaming-slot）',
+    description: '読み直せるプラグインを全部読み直す。開発者モードまたはこの窓だけ。配信中は、OBS を握る自動枠取りのプラグインだけ飛ばす（skip / streaming-slot）',
     params: {}
   },
   'plugins.browse': {
@@ -46,9 +47,10 @@ const specs = {
 };
 
 function runs(S) {
-  const { holdsObsId, listPlugins, publishDev, readHub, reloadRow, setHidden, setMode, src } = S;
+  const { devModeOn, holdsObsId, listPlugins, publishDev, readHub, reloadRow, setHidden, setMode, src } = S;
   return {
-    'plugins.reloadAll': async function () {
+    'plugins.reloadAll': async function (_params, ctx) {
+      if (!devModeOn() && (!ctx || ctx.clientId !== WINDOW_ID)) return { ok: false, error: 'dev-only' };
       const reg = src.pluginRegistry;
       if (!reg || typeof reg.reloadAll !== 'function') return { ok: false, error: 'unavailable' };
       const hub = await readHub();

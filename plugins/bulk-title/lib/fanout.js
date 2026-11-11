@@ -59,12 +59,12 @@ function createFanout(options) {
   function metadataRow(id, ran) {
     const row = rowOf(id, ran);
     const value = ran && ran.value;
+    if (row.result === 'ok' && value && value.dryRun === true) { row.message = 'dry-run'; return row; }
+    if (row.result === 'ok' && value && value.verified === false) { row.result = 'unverified'; row.message = CODE_RE.test(value.reason || '') ? value.reason : 'not-verified'; return row; }
     if (row.result === 'ok' && value && typeof value === 'object' && !Array.isArray(value) && value.ok === false) {
       const code = value.error;
-      if (typeof code === 'string' && CODE_RE.test(code)) {
-        row.result = 'error';
-        row.message = code;
-      }
+      row.result = 'error';
+      row.message = typeof code === 'string' && CODE_RE.test(code) ? code : 'failed';
     }
     return row;
   }
@@ -164,7 +164,9 @@ function createFanout(options) {
         else if (method === 'updateTitle') args = [title, meta];
         else args = [category, meta];
         const ran = await peers.run(id, method, args, { queue: 'fanout' });
-        return withMode(rowOf(id, ran), mode);
+        const done = rowOf(id, ran);
+        if (dryRun && done.result === 'ok') done.message = 'dry-run';
+        return withMode(done, mode);
       })());
     }
     const rows = await Promise.all(jobs);

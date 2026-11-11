@@ -1,5 +1,7 @@
 # marust — simulcast control app for OBS
 
+**Minimum 0.3.1 is a prerelease.** It improves YouTube output selection, rollover recovery and connection status. Your own authentication and configuration are required. See [release notes and verification limits](docs/release-0.3.1.md).
+
 > **The user interface is in Japanese only.** This page is a short English overview. Screens, buttons and messages are Japanese; an English UI is not planned. The detailed guide ([docs/GUIDE.md](docs/GUIDE.md)) is also Japanese. The main README is [README.md](README.md) (Japanese).
 
 marust ("maru-suto") is a Windows desktop app that makes it easier for streamers in Japan to **stream from OBS to several sites at once** (YouTube, Niconico Live, Twitch and others); it starts, stops and monitors them from one screen. Japanese sites come first, overseas sites later; the major overseas sites (YouTube and Twitch stable, Kick and others experimental) are already covered. It does not send video itself: OBS sends the video, using a modified `obs-multi-rtmp` plugin that is distributed separately. marust controls the destinations, titles and categories around it. Stopping marust does not stop the stream.

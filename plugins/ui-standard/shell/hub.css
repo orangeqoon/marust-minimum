@@ -136,7 +136,10 @@
     button.emergency.blue { background: #1d4e89; color: #e8f1ff; }
     button.emergency.gray { background: #3a3f4b; color: #c5cad6; }
     .stop-all-row { margin: 0 0 12px; }
-    button.stop-all { min-width: 12rem; font-weight: 700; background: #2b2f3a; color: #fff; border: 2px solid #c9a227; }
+    button.stop-all { min-width: 12rem; font-weight: 700; background: #2b2f3a; color: #fff; border: 2px solid #c9a227; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
+    button.stop-all.is-streaming { background: #9f1d2d; border-color: #ff6b6b; color: #fff; }
+    button.stop-all.is-idle { background: #26352d; border-color: #63a67b; color: #c7efd2; }
+    button.stop-all.is-unknown { background: #2b2f3a; border-color: #c9a227; color: #fff; }
     .state-live { color: var(--ok); }
     .state-connecting, .state-reconnecting { color: var(--warn); }
     .state-stopped { color: var(--skip); }
@@ -407,6 +410,10 @@ body.narrow header.app-title h1, body.solo header.app-title h1 { font-size: 1.1r
 .dock-actions-right { display: flex; align-items: center; gap: 2px; padding-right: 6px; height: 100%; }
 .dock-icon-btn { font: inherit; color: var(--muted); background: transparent; border: 0; border-radius: 6px; padding: 3px 7px; cursor: pointer; }
 .dock-icon-btn:hover { background: var(--panel-2); color: var(--text); }
+.dock-popout-only { display: none; }
+.marust-popout .dock-popout-only { display: inline-block; }
+.dock-popout-only[aria-pressed="true"] { color: #071b0e; background: #7ee2a0; box-shadow: inset 0 0 0 2px #29a557; font-weight: 700; }
+.dock-popout-only[aria-pressed="false"] { color: var(--text); background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--line-2); }
 
 /* 部品を小さく・そろえる */
 button.timer-btn, input[type="number"], input[type="text"], input[type="password"], select { padding: 4px 9px; border-radius: 6px; font-size: calc(13px * var(--font-scale)); }
@@ -418,6 +425,17 @@ table { font-size: calc(12.5px * var(--font-scale)); }
 th, td { padding: 5px 6px; }
 .timer-setup, .timer-actions { gap: 6px 10px; margin-top: 8px; }
 .timer-hint { font-size: calc(12px * var(--font-scale)); margin: 0 0 6px; }
+.home-title-setup { display: grid; grid-template-columns: minmax(18rem, 3fr) minmax(10rem, 1fr) auto auto; align-items: end; }
+.home-title-setup label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.home-title-field input { min-height: 2.75rem; font-size: 1.65rem; font-weight: 600; width: 100%; }
+.home-category-field input { min-height: 2rem; font-size: .95rem; width: 100%; }
+.home-title-plugin-bar { margin-top: 12px; padding-top: 6px; border-top: 1px solid var(--line-2); }
+.title-sync-retry { color: var(--danger); border-color: var(--danger); cursor: pointer; }
+.title-sync-retry:hover { background: var(--danger) !important; color: #fff; }
+@media (max-width: 760px) {
+  .home-title-setup { grid-template-columns: 1fr 1fr; }
+  .home-title-field { grid-column: 1 / -1; }
+}
 .mode { font-size: 1.1rem; padding: 4px 10px; border-radius: 8px; background: var(--panel-2); border-color: var(--line-2); }
 button.emergency { min-width: 14rem; min-height: 2.6rem; }
 
@@ -543,7 +561,6 @@ td.site-off { opacity: 0.6; }
 body[data-ui-level="basic"] .menu[data-menu="edit"],
 body[data-ui-level="basic"] .menu[data-menu="profile"],
 body[data-ui-level="basic"] .menu[data-menu="view"],
-body[data-ui-level="basic"] .menu[data-menu="tools"],
 body[data-ui-level="standard"] .menu[data-menu="edit"],
 body[data-ui-level="standard"] .menu[data-menu="profile"] { display: none; }
 .home-alert { background: var(--panel-2); border: 1px solid var(--danger); border-left: 6px solid var(--danger); color: var(--text); border-radius: 6px; padding: 8px 10px; margin: 0 0 10px; font-weight: 600; }
@@ -585,14 +602,23 @@ body[data-ui-level="standard"] .menu[data-menu="profile"] { display: none; }
 
 /* 初級: 配信開始・配信停止・サイトのボタン（＋で足す）だけ。サイトのボタンを押すとそのサイトの設定が開く */
 body[data-ui-level="basic"] .home > h2,
+body[data-ui-level="standard"] .home > h2,
 body[data-ui-level="basic"] .home > .timer-setup,
+body[data-ui-level="standard"] .home > .timer-setup,
 body[data-ui-level="basic"] .home > #home-apply-status,
+body[data-ui-level="standard"] .home > #home-apply-status,
 body[data-ui-level="basic"] .home > #home-tip,
+body[data-ui-level="standard"] .home > #home-tip,
 body[data-ui-level="basic"] .home > .home-head,
+body[data-ui-level="standard"] .home > .home-head,
 body[data-ui-level="basic"] .home > #home-sites,
+body[data-ui-level="standard"] .home > #home-sites,
 body[data-ui-level="basic"] .home > .home-line,
-body[data-ui-level="basic"] .home > details.adv { display: none !important; }
-body[data-ui-level="basic"] .home > .home-features-row { display: none !important; }
+body[data-ui-level="standard"] .home > .home-line,
+body[data-ui-level="basic"] .home > details.adv,
+body[data-ui-level="standard"] .home > details.adv { display: none !important; }
+body[data-ui-level="basic"] .home > .home-features-row,
+body[data-ui-level="standard"] .home > .home-features-row { display: none !important; }
 .feature-row { margin: 6px 0; }
 .feature-row .feature-hint, .feature-row .feature-need { display: block; margin-left: 22px; }
 .feature-row .feature-need { color: var(--warn); }

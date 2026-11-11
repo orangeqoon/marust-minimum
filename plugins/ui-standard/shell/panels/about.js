@@ -1,9 +1,11 @@
 'use strict';
 /** パネル `about`（この画面について）。Windows の起動時に開く設定もここ。 */
 function initOpenAtLogin() {
+  var call = panelCall('openAtLogin');
   var box = document.getElementById('login-item');
   var input = document.getElementById('open-at-login');
   var status = document.getElementById('open-at-login-status');
+  var root = panelRoot('about');
   if (!box || !input || input.dataset.bound === '1') return;
   input.dataset.bound = '1';
   var isWindow = false;
@@ -18,8 +20,8 @@ function initOpenAtLogin() {
     applyNeed();
   }
   function refresh() {
-    if (saving) return;
-    call('hub.getState').then(function (state) {
+    if (saving || !root || document.hidden || root.offsetParent === null) return Promise.resolve();
+    return call('hub.getState').then(function (state) {
       if (saving) return null;
       notePermissions(state && state.permissions); if (state && typeof state.confirmLive === 'boolean') confirmLiveWanted = state.confirmLive;
       isWindow = !!(state && state.clientId === 'local-window');
@@ -64,22 +66,21 @@ function initOpenAtLogin() {
       saving = false;
     });
   });
-  refresh();
-  setInterval(refresh, 5000);
+  watchDisplay(root, refresh, displayStateEvent);
 }
 function initAbout() {
+  var call = panelCall('about');
   var root = panelRoot('about');
   if (!root || root.dataset.bound === '1') return;
   root.dataset.bound = '1';
   function refresh() {
-    call('hub.getState').then(function (state) {
+    return call('hub.getState').then(function (state) {
       notePermissions(state && state.permissions); if (state && typeof state.confirmLive === 'boolean') confirmLiveWanted = state.confirmLive;
       var notes = root.querySelector('#notes');
       if (notes) notes.innerHTML = (state.notes || []).map(function (n) { return '<li>' + escapeHtml(n) + '</li>'; }).join('');
     }).catch(function () {});
   }
-  refresh();
-  setInterval(refresh, 5000);
+  watchDisplay(root, refresh, displayStateEvent);
 }
 
 registerPanel('about', initAbout);

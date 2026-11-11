@@ -2,7 +2,7 @@
   "id": "picarto",
   "name": "Picarto",
   "category": "destination",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "tier": "standard",
   "manifestVersion": 2,
   "runtime": "inproc",
@@ -22,7 +22,8 @@
       "defaultMode": "legacy",
       "actions": {
         "getStatus": "read",
-        "setToken": "write"
+        "setToken": "write",
+        "checkAuth": "read"
       },
       "panels": [
         {

@@ -26,6 +26,7 @@ const TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
 let seq = 0;
 let pending = '';
+let panelActive = true;
 
 function call(method, params) {
   seq += 1;
@@ -75,5 +76,11 @@ window.addEventListener('message', (event) => {
 });
 
 call('plugin.' + ID + '.getStatus', {});
-setInterval(() => call('plugin.' + ID + '.getStatus', {}), 3000);
+window.addEventListener('message', (event) => {
+  const msg = event && event.data;
+  if (!msg || msg.type !== 'marust:panel-activity') return;
+  panelActive = msg.active !== false;
+  if (panelActive) call('plugin.' + ID + '.getStatus', {});
+});
+setInterval(() => { if (panelActive) call('plugin.' + ID + '.getStatus', {}); }, 3000);
 })();

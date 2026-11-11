@@ -122,7 +122,7 @@ function initFeatures() {
   }
   function visible() { return root.offsetParent !== null; }
   refresh();
-  setInterval(function () { if (visible()) refresh(); }, 15000);
+  setInterval(function () { if (visible() && !document.hidden) refresh(); }, 15000);
   if (hubApi() && hubApi().subscribe) hubApi().subscribe(function (msg) { if (msg && msg.name === 'modes.changed' && visible()) refresh(); });
 }
 

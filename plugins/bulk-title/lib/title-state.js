@@ -62,7 +62,7 @@ function summarizeSiteRows(siteRows) {
     const r = siteRows[i];
     if (r.mode === 'legacy' || r.message === 'legacy-mode') continue;
     counts.total += 1;
-    if (r.result === 'ok') counts.ok += 1;
+    if (r.result === 'ok' && r.mode !== 'shadow' && r.message !== 'dry-run') counts.ok += 1;
     else if (r.result === 'error') counts.error += 1;
     else if (r.message === 'not-configured' || r.message === 'not-configured-timeout') counts.notConfigured += 1;
     else counts.skipped += 1;

@@ -111,6 +111,15 @@ function notConnected() {
   return err;
 }
 
+function normalizedServer(value) {
+  try {
+    const url = new URL(value);
+    if ((url.protocol === 'rtmp:' && url.port === '1935') || (url.protocol === 'rtmps:' && url.port === '443')) url.port = '';
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.toString();
+  } catch (_) { return value; }
+}
+
 function createObsConnection(options) {
   const opts = options || {};
   const orchestrator = opts.orchestrator;
@@ -129,6 +138,8 @@ function createObsConnection(options) {
   let timer = null;
   const status = { connected: false, detail: '未接続' };
   const vendorHandlers = [];
+  let serviceRevision = 0;
+  let serviceProfile = null;
 
   function warn(detail) {
     status.detail = detail;
@@ -140,6 +151,7 @@ function createObsConnection(options) {
     const vendorName = data && (data.vendorName || data.vendor_name);
     const eventType = data && (data.eventType || data.event_type);
     if (vendorName !== VENDOR_NAME) return;
+    if (/config|settings|target_added|target_removed|target_created|target_deleted/.test(String(eventType || ''))) serviceRevision += 1;
     if (eventType !== 'target_state_changed' && eventType !== 'emergency_stop') return;
     const eventData = data && (data.eventData || data.event_data) ? (data.eventData || data.event_data) : {};
     // target_state_changed は従来どおり中身だけ。emergency_stop は種類が分かる形で渡す。
@@ -170,7 +182,10 @@ function createObsConnection(options) {
         .catch(() => warn('OBS イベントを配れませんでした'));
     });
     obs.on('VendorEvent', (data) => emitVendor(data));
+    obs.on('CurrentProfileChanged', () => { serviceRevision += 1; });
+    obs.on('StreamServiceSettingsChanged', () => { serviceRevision += 1; });
     obs.on('ConnectionClosed', () => {
+      serviceRevision += 1;
       connected = false;
       warn('OBS 切断。30秒後に再接続します');
       schedule();
@@ -291,6 +306,51 @@ function createObsConnection(options) {
     return client.call(requestName, requestData);
   }
 
+  // Internal only: compare credentials in this stack; never retain or return them.
+  async function verifyService(input) {
+    const data = input || {};
+    const expected = data.expected;
+    const gen = generation;
+    const unknown = () => { serviceRevision += 1; return { match: 'unknown', revision: generation + ':' + serviceRevision }; };
+    if (!expected || typeof expected.server !== 'string' || !expected.server || typeof expected.key !== 'string' || !expected.key || typeof data.targetId !== 'string' || !data.targetId) return unknown();
+    try {
+      const profile = await withTimeout(rawCall('GetProfileList'), syncTimeoutMs, 'VERIFY_TIMEOUT');
+      if (!profile || typeof profile.currentProfileName !== 'string' || !profile.currentProfileName) return unknown();
+      if (serviceProfile !== profile.currentProfileName) { serviceProfile = profile.currentProfileName; serviceRevision += 1; }
+      const revision = serviceRevision;
+      let settings;
+      if (data.targetId === 'main') {
+        const main = await withTimeout(rawCall('GetStreamServiceSettings'), syncTimeoutMs, 'VERIFY_TIMEOUT');
+        settings = main && main.streamServiceSettings;
+        // Cached engine rows default absent sync_stop to false. Only raw explicit
+        // false is proof that stopping main cannot stop another active output.
+        const raw = await withTimeout(rawCall('CallVendorRequest', { vendorName: VENDOR_NAME, requestType: 'list_targets', requestData: {} }), syncTimeoutMs, 'VERIFY_TIMEOUT');
+        const body = raw && raw.responseData ? raw.responseData : raw;
+        if (!body || !Array.isArray(body.targets)) return unknown();
+        if (body.targets.some(row => !row || !['idle', 'stopped', 'live', 'connecting', 'reconnecting'].includes(row.state)
+          || (['live', 'connecting', 'reconnecting'].includes(row.state) && row.sync_stop !== false)
+          || (['idle', 'stopped'].includes(row.state) && row.enabled !== false && row.sync_start !== false))) return unknown();
+      } else {
+        const raw = await withTimeout(rawCall('CallVendorRequest', { vendorName: VENDOR_NAME, requestType: 'get_target_config', requestData: { id: data.targetId, reveal_secrets: true } }), syncTimeoutMs, 'VERIFY_TIMEOUT');
+        const body = raw && raw.responseData ? raw.responseData : raw;
+        settings = body && !body.error && body.success !== false ? body.service_settings : null;
+      }
+      const after = await withTimeout(rawCall('GetProfileList'), syncTimeoutMs, 'VERIFY_TIMEOUT');
+      if (!connected || gen !== generation || revision !== serviceRevision || !after || after.currentProfileName !== profile.currentProfileName) {
+        serviceRevision += 1;
+        return unknown();
+      }
+      if (!settings || typeof settings.server !== 'string' || typeof settings.key !== 'string' || !settings.server || !settings.key || settings.key === '***redacted***') return unknown();
+      const servers = [expected.server].concat(Array.isArray(expected.servers) ? expected.servers : []).slice(0, 4).filter(value => typeof value === 'string' && value);
+      const sameServer = servers.some(value => normalizedServer(value) === normalizedServer(settings.server));
+      if (!sameServer || settings.key !== expected.key) serviceRevision += 1;
+      return { match: sameServer && settings.key === expected.key ? 'match' : 'mismatch', revision: gen + ':' + serviceRevision };
+    } catch (_) {
+      serviceRevision += 1;
+      return unknown();
+    }
+  }
+
   function call(requestName, requestData) {
     if (classifyRequest(requestName, requestData) !== 'read') return Promise.reject(forbidden());
     const name = String(requestName || '');
@@ -319,6 +379,7 @@ function createObsConnection(options) {
       requestData: requestData && typeof requestData === 'object' ? requestData : {}
     };
     if (classifyRequest('CallVendorRequest', wrapped) !== tier) return Promise.reject(forbidden());
+    if (tier !== 'read' && !['start_target', 'stop_target', 'stop_all_targets'].includes(wrapped.requestType)) serviceRevision += 1;
     return rawCall('CallVendorRequest', wrapped);
   }
 
@@ -372,6 +433,7 @@ function createObsConnection(options) {
     disconnect,
     call,
     controlStream,
+    verifyService,
     getStatus,
     onVendorEvent,
     loadObsConfig: () => loadObsConfig(core)

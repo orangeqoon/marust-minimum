@@ -1,9 +1,7 @@
 'use strict';
 
 /**
- * 計画 C・C6-1: ひとつしか持てない口の持ち主はセット（source: 'set'）だけ。
- * キー割り当て（needs: keys → ctx.keys）と予約の自動送信（needs: title.reserved）は、
- * 自分で足したもの（source: 'user'）が書いても持てない。
+ * キー割り当てはセットだけ。予約の自動送信は出どころを問わず宣言したプラグインが使える。
  * コメントの受け口（chat-port.js → port('chat.inlet@1')）は test/c2-origin.test.js で同じ決まりを見ている。
  */
 
@@ -73,11 +71,12 @@ async function main() {
       assert.strictEqual(seen['key-only-user'].keys, undefined);
     });
 
-    await test('予約の自動送信: セットだけが titleReserved を得る。自分で足したものは得ない', async () => {
+    await test('予約の自動送信: 複数のセットと後から追加したものが titleReserved を得る', async () => {
       const c = pair();
       try {
         const extra = { needs: ['title.reserved'], api: { calls: ['hub.fanoutReserved'] } };
         writePlugin(c.set, 'rsv-set', extra);
+        writePlugin(c.set, 'rsv-set-two', extra);
         writePlugin(c.user, 'rsv-user', extra);
         const registry = world(c.set, c.user, c.state);
         const grants = [];
@@ -89,15 +88,17 @@ async function main() {
         await registry.loadAll();
         registry.attachApi(fake);
         await seen['rsv-set'].api.call('hub.fanoutReserved', { title: 't' });
+        await seen['rsv-set-two'].api.call('hub.fanoutReserved', { title: 't' });
         await seen['rsv-user'].api.call('hub.fanoutReserved', { title: 't' });
         assert.deepStrictEqual(grants, [
           { id: 'rsv-set', titleReserved: true },
-          { id: 'rsv-user', titleReserved: false }
+          { id: 'rsv-set-two', titleReserved: true },
+          { id: 'rsv-user', titleReserved: true }
         ]);
       } finally { fs.rmSync(c.set, { recursive: true, force: true }); fs.rmSync(c.state, { recursive: true, force: true }); }
     });
 
-    await test('予約の自動送信: セットに持ち主が居なくても、自分で足したものは得ない', async () => {
+    await test('予約の自動送信: セットがなくても後から追加したものが使える', async () => {
       const d = pair();
       try {
         writePlugin(d.user, 'rsv-only-user', { needs: ['title.reserved'], api: { calls: ['hub.fanoutReserved'] } });
@@ -110,7 +111,7 @@ async function main() {
           registerPluginMethod() { return { ok: true }; }
         });
         await seen['rsv-only-user'].api.call('hub.fanoutReserved', { title: 't' });
-        assert.deepStrictEqual(grants, [false]);
+        assert.deepStrictEqual(grants, [true]);
       } finally { fs.rmSync(d.set, { recursive: true, force: true }); fs.rmSync(d.state, { recursive: true, force: true }); }
     });
   } finally {

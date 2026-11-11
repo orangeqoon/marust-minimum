@@ -28,10 +28,10 @@ const specs = {
     description: '作者用モードのプラグインがあるとき、すべてのプラグインを legacy に戻す。無いときは unavailable',
     params: {}
   },
-  // タイマーの自動送信（K3）。プラグイン timer-link だけが呼べる（宣言した内蔵。出どころは核が付ける）。確認の門は核の予約（host/core/fanout-gate.js）
+  // 宣言したプラグインからの自動送信。確認済みの送信先を核の予約で検査する。
   'hub.fanoutReserved': {
     permission: 'write',
-    description: 'タイマーを始めたときの題名・カテゴリの自動送信。核が確認した予約の範囲だけ送る。プラグイン timer-link だけが呼べる',
+    description: '題名・カテゴリの自動送信。宣言したプラグインが、核で確認済みの送信先に送る',
     params: {
       title: { type: 'string', required: false, max: 500 },
       category: { type: 'string', required: false, max: 200 }
@@ -58,7 +58,7 @@ function runs(S) {
     'hub.fanout': function (params) { return src.fanout(params); },
     'hub.forceLegacy': function () { return src.forceLegacy(); },
     'hub.fanoutReserved': function (params, ctx) {
-      if (!ctx || ctx.kind !== 'plugin' || ctx.titleReserved !== true) return { ok: false, error: 'forbidden' }; // manifest needs の title.reserved を持つ内蔵 1 つだけ（登録簿が認める）
+      if (!ctx || ctx.kind !== 'plugin' || ctx.titleReserved !== true) return { ok: false, error: 'forbidden' }; // manifest needs の title.reserved を持つプラグイン（登録簿が認める）
       if (!src.fanoutReserved || typeof src.fanoutReserved.send !== 'function') return { ok: false, error: 'unavailable' };
       return src.fanoutReserved.send({ title: params.title, category: params.category }); // confirmed などは受け取らない
     }

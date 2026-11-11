@@ -240,34 +240,69 @@ function mount(doc, planRow) {
 
 function watch(doc) {
   if (!doc) return null;
+  var stopped = false;
+  var unsubscribe = null;
+  var busy = false, dirty = false, pending = null;
+  var session = null, sessionAt = 0;
+  function visible() { return !stopped && !doc.hidden; }
   function refreshDestinations() {
-    rpc('engine.listTargets').then(function (rows) {
+    if (!visible() || !doc.getElementById('dock-dest-status')) return Promise.resolve();
+    return rpc('engine.listTargets').then(function (rows) {
+      if (stopped) return;
       paintDestinations(doc, Array.isArray(rows) ? rows : []);
     }).catch(function () {});
   }
   function refreshSession() {
-    rpc('hub.getState').then(function (state) {
-      paintSession(doc, state && state.session);
+    if (!visible() || !doc.getElementById('dock-session-clock')) return Promise.resolve();
+    return rpc('hub.getState').then(function (state) {
+      if (stopped) return;
+      session = state && state.session;
+      sessionAt = Date.now();
+      paintSession(doc, session);
     }).catch(function () {});
   }
-  refreshDestinations();
-  refreshSession();
-  var timers = [
-    setInterval(refreshDestinations, 2000),
-    setInterval(refreshSession, 1000)
-  ];
-  if (typeof window !== 'undefined' && window.marustApi && typeof window.marustApi.subscribe === 'function') {
-    window.marustApi.subscribe(function () {
-      refreshDestinations();
-      refreshSession();
+  function refresh() {
+    if (!visible()) return;
+    if (busy) { dirty = true; return; }
+    busy = true;
+    Promise.all([refreshDestinations(), refreshSession()]).then(function () {
+      busy = false;
+      if (dirty) { dirty = false; request(); }
     });
   }
-  return {
-    stop: function () {
+  function request() {
+    if (!visible() || pending !== null) return;
+    pending = setTimeout(function () { pending = null; refresh(); }, 100);
+  }
+  refresh();
+  var timers = [
+    setInterval(refresh, 15000),
+    setInterval(function () {
+      if (!visible() || !session || !doc.getElementById('dock-session-clock')) return;
+      var elapsed = Number(session.elapsedMs) || 0;
+      if (session.active && session.state === 'running') elapsed += Math.max(0, Date.now() - sessionAt);
+      paintSession(doc, Object.assign({}, session, { elapsedMs: elapsed }));
+    }, 1000)
+  ];
+  if (typeof window !== 'undefined' && window.marustApi && typeof window.marustApi.subscribe === 'function') {
+    unsubscribe = window.marustApi.subscribe(function (msg) {
+      if (!msg || !/^(session|engine|stream|broadcast|destination)\./.test(msg.name || '')) return;
+      request();
+    });
+  }
+  function stop(ev) {
+      if (ev && ev.persisted) return;
+      stopped = true;
+      if (typeof unsubscribe === 'function') unsubscribe();
+      if (pending !== null) clearTimeout(pending);
       timers.forEach(function (id) { clearInterval(id); });
       timers = [];
-    }
-  };
+      if (doc.removeEventListener) doc.removeEventListener('visibilitychange', request);
+      if (global && global.removeEventListener) global.removeEventListener('pagehide', stop);
+  }
+  if (doc.addEventListener) doc.addEventListener('visibilitychange', request);
+  if (global && global.addEventListener) global.addEventListener('pagehide', stop);
+  return { stop: stop };
 }
 
 var api = {

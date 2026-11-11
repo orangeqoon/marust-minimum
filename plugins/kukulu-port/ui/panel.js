@@ -12,6 +12,7 @@ const TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
 let seq = 0;
 let pending = '';
+let panelActive = true;
 
 function call() {
   seq += 1;
@@ -54,4 +55,10 @@ window.addEventListener('message', (event) => {
 });
 
 call();
-setInterval(call, 3000);
+window.addEventListener('message', (event) => {
+  const msg = event && event.data;
+  if (!msg || msg.type !== 'marust:panel-activity') return;
+  panelActive = msg.active !== false;
+  if (panelActive) call();
+});
+setInterval(() => { if (panelActive) call(); }, 3000);

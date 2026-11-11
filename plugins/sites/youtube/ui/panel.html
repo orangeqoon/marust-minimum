@@ -38,15 +38,22 @@
     <dt>OBS</dt><dd id="slot-obs">-</dd>
     <dt>今の枠</dt><dd id="slot-broadcast">-</dd>
     <dt>最後の動き</dt><dd id="slot-op">-</dd>
+    <dt>切り替え予定</dt><dd id="slot-deadline">-</dd>
+    <dt>切り替えまで</dt><dd id="slot-remaining">-</dd>
+    <dt>切り替えの保留</dt><dd id="slot-hold">-</dd>
     <dt>ログイン</dt><dd id="slot-login">-</dd>
     <dt>きょうの使用量</dt><dd id="slot-usage">-</dd>
   </dl>
   <p class="actions">
     <button id="slot-refresh" type="button">自動枠取りを更新</button>
     <button id="slot-test" type="button">テスト枠を作る</button>
+    <button id="slot-resume" type="button" hidden>中断した切替を確認して再開</button>
   </p>
+  <p class="note" id="slot-resumenote" role="status"></p>
   <p class="note" id="slot-testnote">テスト枠は非公開の枠を 1 つ作ってストリームに結ぶだけです（live モードのときだけ。本物の YouTube に書きます）。</p>
   <form id="slot-config">
+    <label for="slot-output">YouTubeを送るOBS出力</label>
+    <select id="slot-output"><option value="">出力を選択してください</option></select>
     <label for="slot-threshold">切り替えまでの秒数</label>
     <input id="slot-threshold" type="number" min="600" max="43200" step="60">
     <label for="slot-streamid">ストリーム id</label>

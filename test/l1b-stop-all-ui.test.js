@@ -22,6 +22,15 @@ test('home.js has home-stop-all and calls broadcast.stopAll', () => {
   const src = read('plugins/ui-standard/shell/panels/home.js');
   assert.ok(src.includes("id: 'home-stop-all'"));
   assert.ok(src.includes("call('broadcast.stopAll', {})"));
+  assert.ok(src.includes("classList.toggle('is-streaming', liveNow)"));
+  assert.ok(src.includes("classList.toggle('is-idle', state.liveCount === 0)"));
+});
+
+test('hub.css colors stop-all by streaming state', () => {
+  const css = read('plugins/ui-standard/shell/hub.css');
+  assert.ok(css.includes('button.stop-all.is-streaming'));
+  assert.ok(css.includes('button.stop-all.is-idle'));
+  assert.ok(css.includes('button.stop-all.is-unknown'));
 });
 
 test('home-stop-all is not inside the same actions container as home-start', () => {

@@ -80,6 +80,11 @@ function createObsLocalEngine(options) {
   let missing = [];
   let capsChecked = false;
   let stopReason = '';
+  let manualStopRevision = 0;
+  let allStopRevision = 0;
+  const targetStopRevisions = new Map();
+  let expectedMainStopUntil = 0;
+  const expectedTargetStops = new Map();
   let suppressObsStopping = false;
   let aggregateActive = false;
   let aggregateReady = false;
@@ -291,6 +296,16 @@ function createObsLocalEngine(options) {
     const prev = cache.get(id) || null;
     if (prev && typeof prev.observedAt === 'string' && observedAt < prev.observedAt) return false;
     const state = target.state != null ? String(target.state) : (prev ? prev.state : 'stopped');
+    // Polls can observe a stop before its vendor event. Track both through
+    // the same transition so a fresh proof cannot erase a manual stop.
+    if (prev && ACTIVE.has(prev.state) && ['idle', 'stopped'].includes(state)) {
+      const expected = expectedTargetStops.get(id) || 0;
+      expectedTargetStops.delete(id);
+      if (expected <= Date.now()) {
+        manualStopRevision += 1;
+        targetStopRevisions.set(id, (targetStopRevisions.get(id) || 0) + 1);
+      }
+    }
     let keyTail = null;
     if (createdKeyTails.has(id)) {
       keyTail = createdKeyTails.get(id);
@@ -581,6 +596,8 @@ function createObsLocalEngine(options) {
   }
 
   function onEmergency(body) {
+    manualStopRevision += 1;
+    allStopRevision += 1;
     stopReason = 'emergency';
     const rawAt = body && typeof body.time === 'string' && body.time ? body.time : iso();
     publish(EVENTS.ENGINE_EMERGENCY_STOP, { engineId: ENGINE_ID, at: redact(rawAt) }, {});
@@ -601,6 +618,10 @@ function createObsLocalEngine(options) {
   function onOutputState(outputState) {
     if (outputState === 'OBS_WEBSOCKET_OUTPUT_STARTED' || outputState === 'OBS_WEBSOCKET_OUTPUT_STOPPED') readMain().catch(() => {});
     if (outputState !== 'OBS_WEBSOCKET_OUTPUT_STOPPING') return;
+    if (expectedMainStopUntil > Date.now()) { expectedMainStopUntil = 0; return; }
+    expectedMainStopUntil = 0;
+    manualStopRevision += 1;
+    targetStopRevisions.set(MAIN_ID, (targetStopRevisions.get(MAIN_ID) || 0) + 1);
     if (suppressObsStopping || stopReason === 'emergency') {
       suppressObsStopping = false;
       return;
@@ -645,7 +666,20 @@ function createObsLocalEngine(options) {
     return { send: 'live' };
   }
 
-  async function vendorWrite(requestType, requestData, hasDryRun) {
+  function stopRevisionFor(targetId) { return targetId == null ? manualStopRevision : allStopRevision + (targetStopRevisions.get(String(targetId)) || 0); }
+
+  function dispatchGuard(flags, targetId) {
+    try {
+      if (flags && typeof flags.guard === 'function' && flags.guard() !== true) return { ok: false, error: 'plugin-stopped' };
+      if (flags && Number.isFinite(flags.deadlineAtMs) && Date.now() >= flags.deadlineAtMs) return { ok: false, error: 'operation-expired' };
+      if (flags && Number.isFinite(flags.expectedStopRevision) && flags.expectedStopRevision !== stopRevisionFor(targetId)) return { ok: false, error: 'human-stopped' };
+    } catch (_) { return { ok: false, error: 'plugin-stopped' }; }
+    return null;
+  }
+
+  async function vendorWrite(requestType, requestData, hasDryRun, flags) {
+    const expired = dispatchGuard(flags, requestData && requestData.id);
+    if (expired) return expired;
     const gate = writeGate(hasDryRun);
     const id = requestData && requestData.id != null ? String(requestData.id) : '';
     if (!gate.send) {
@@ -664,6 +698,8 @@ function createObsLocalEngine(options) {
         return { ok: true, dryRun: true };
       }
     }
+    const stale = dispatchGuard(flags, requestData && requestData.id);
+    if (stale) return stale;
     const real = await vendor('write', requestType, requestData);
     if (real && real.success === false) {
       record(requestType, { id: id, sent: true, dryRun: false, ok: false, error: real.error || 'rejected' });
@@ -847,6 +883,11 @@ function createObsLocalEngine(options) {
   }
 
   function stop(id, flags) {
+    if (flags && (flags.reason === 'manual' || flags.reason === 'emergency')) {
+      manualStopRevision += 1;
+      if (id != null && id !== '') targetStopRevisions.set(String(id), (targetStopRevisions.get(String(id)) || 0) + 1);
+      else allStopRevision += 1;
+    }
     if (id == null || id === '') {
       shutdown();
       return Promise.resolve({ ok: true });
@@ -856,7 +897,18 @@ function createObsLocalEngine(options) {
       return controlMain('stop');
     }
     if (flags && flags.reason === 'manual') suppressObsStopping = true;
-    return op(() => vendorWrite('stop_target', { id: String(id || '') }, false));
+    return op(async () => {
+      const targetId = String(id || '');
+      const valid = dispatchGuard(flags, targetId);
+      if (valid) return valid;
+      const until = Date.now() + 10000;
+      expectedTargetStops.set(targetId, until);
+      try {
+        const out = await vendorWrite('stop_target', { id: targetId }, false, flags);
+        if (!out || !out.ok) expectedTargetStops.delete(targetId);
+        return out;
+      } catch (error) { expectedTargetStops.delete(targetId); throw error; }
+    });
   }
 
   function setEnabled(id, enabled) {
@@ -944,6 +996,8 @@ function createObsLocalEngine(options) {
   }
 
   async function stopAll(ctx) {
+    manualStopRevision += 1;
+    allStopRevision += 1;
     const info = ctx || {};
     const correlationId = info.correlationId || ('c-' + crypto.randomBytes(4).toString('hex'));
     const at = iso();
@@ -1086,12 +1140,18 @@ function createObsLocalEngine(options) {
     modeId: MODE_ID,
     capabilities,
     listTargets,
+    getStopRevision: stopRevisionFor,
+    expectMainStop() {
+      const until = Date.now() + 10000;
+      expectedMainStopUntil = until;
+      return () => { if (expectedMainStopUntil === until) expectedMainStopUntil = 0; };
+    },
     readTargetRates,
     readTargetStats,
     status,
-    start(id) {
+    start(id, flags) {
       if (String(id) === MAIN_ID) return controlMain('start');
-      return op(() => vendorWrite('start_target', { id: String(id || '') }, false));
+      return op(() => vendorWrite('start_target', { id: String(id || '') }, false, flags));
     },
     connect: start,
     reconnect,

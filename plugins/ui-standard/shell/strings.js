@@ -227,7 +227,8 @@ var STR = {
       'redirect-mismatch': '戻り先がサイト側の登録と一致しません。ログインの準備の戻り先と、サイト側の登録を揃えてください',
       'unauthorized': 'サイトに認証を断られました。ログインの準備の鍵（クライアント ID・シークレット）が合っているか確かめてください',
       'network': 'サイトにつながりませんでした。回線を確かめて、もう一度やり直してください',
-      'unavailable': '結果を丸ストの金庫に保存できませんでした'
+      'unavailable': '結果を丸ストの金庫に保存できませんでした',
+      'key-role-mismatch': 'このクライアント ID は別の用途（サイト用またはカレンダー用）で既に登録されています。取り違えを防ぐため、同じ ID は両方には使えません。正しい欄（カレンダーは金庫／サイトは各サイトのパネル）へ入れてください'
     };
     return Object.prototype.hasOwnProperty.call(map, code) ? map[code] : '保存できませんでした';
   },
@@ -292,7 +293,6 @@ var STR = {
   homeSendConfirm: function (name) { return name + ' を「題名を送る」にします。サイトの配信枠に実際に反映されます。よいですか。'; },
   homeUnuseConfirm: function (name) { return name + ' は送信中です。「配信先を使う」を外すと止まります。よいですか。'; },
   homeApplyFailed: '反映できませんでした',
-  fanoutConfirmOnce: function (names) { return '本番送信するサイト: ' + names + '。題名を送ると、サイトの配信枠に実際に反映されます。この確認は今回だけで、二度と出ません。よろしいですか？'; },
   homeLineHead: '回線',
   homeLineWatchOff: '見張り: 切',
   homeLineWatchUse: '使う',
@@ -386,6 +386,7 @@ var STR = {
     if (typeof t === 'string') t = { code: t, kind: t === 'login-expired' ? 'login-expired' : 'failed' };
     var code = t && t.code;
     if (code === 'main-not-youtube') return 'YouTube の枠の切り替えは止まっています。ホームのメイン出力で「使う」とサイト「YouTube」を選ぶと動きます。';
+    if (code === 'target-not-configured') return 'YouTube の枠の切り替えは止まっています。YouTube の配信先を有効にして OBS のターゲットへリンクしてください。';
     var jobs = { slot: '枠の用意', title: '題名の送信', comment: 'コメントの送信' };
     var job = jobs[t && t.job] || '枠の用意';
     var kind = t && t.kind;
@@ -538,6 +539,8 @@ var STR = {
   sitesClientId: 'クライアント ID',
   sitesClientSecret: 'クライアントシークレット',
   sitesSaveAndLogin: '保存してログインする',
+  sitesSaveTo: function (name) { return (name || 'サイト') + ' に保存'; },
+  sitesOauthNotCalendar: '※ ここは配信サイト用の鍵です。Google カレンダー用ではありません（カレンダーは「金庫」→「Google カレンダー連携」）。',
   sitesLoginOk: 'ログインできました。',
   sitesRequiredSuffix: '（必須）',
   sitesBlankKeeps: '空欄にすると、今の値のままです。',
@@ -590,9 +593,20 @@ var STR = {
   siteFrameAll: '全部のサイトで使える機能',
   siteFrameEmpty: 'このサイトで使える機能は、今はありません。',
   featuresHomeButton: '機能を足す',
+  pluginManagerMenuLabel: 'プラグインの管理',
   pluginManagerMenu: 'プラグインの管理',
+  pluginManagerReloadMenu: 'プラグインを読み込む',
   pluginManagerTitle: 'プラグインの管理',
   pluginManagerHint: '丸ストの機能は、プラグインという部品でできています。いらないものは止めたり隠したりできます（隠しても丸ストの中からは消えません。あとで戻せます）。',
+  pluginManagerReloadAll: '更新したプラグインを全部読み直す',
+  pluginManagerReloadHint: '直したプラグインを、丸ストを再起動せずに読み直します。配信を操作する部品は配信中には飛ばします。',
+  pluginManagerReloadDevOnly: '開発者モードのときだけ使えます。',
+  pluginManagerReloadDone: function (count, skipped, failed) {
+    var text = count + ' 個を読み直しました。';
+    if (skipped) text += ' ' + skipped + ' 個は配信中のため飛ばしました。';
+    if (failed) text += ' ' + failed + ' 個で失敗しました。';
+    return text;
+  },
   pluginManagerEmpty: 'プラグインがありません。',
   pluginManagerFailed: '操作できませんでした。',
   pluginManagerStreaming: '送信中は止めたり隠したりできません。',
@@ -831,8 +845,8 @@ var STR = {
   uiMenubar37: 'コメントを流す・送る窓です。サイトごとの状態の表は、上の「ツール」メニューにあります。',
   uiMenubar38: '開発中機能',
   uiMenubar39: 'まだ作っている途中の機能（各サイトの枠・同接・回線の見張り・通知など）です。使えない物もあります。',
-  uiMenubar40: 'タイマー',
-  uiMenubar41: '配信用のタイマーです。時間の細かい設定と、Google カレンダーへの記録の設定もここにあります。',
+  uiMenubar40: 'その他の機能',
+  uiMenubar41: '上級の追加機能です。機能が入っているときだけ、ここにまとまります。',
   uiMenubar42: '回線の見張り',
   uiMenubar43: '配信中、OBS が落としたフレームや再接続を見て、回線の状態を出します。',
   uiMenubar44: 'オーバーレイ',
@@ -852,6 +866,7 @@ var STR = {
   uiMenubar58: '1 つずつ',
   uiMenubar59: '配置（プロファイル）',
   uiMenubar60: '今の配置を保存…',
+  layoutSaveFailed: '配置を保存できませんでした。名前や空き容量を確かめて、もう一度保存してください。',
   uiMenubar61: 'この配置を削除',
   uiMenubar62: '標準の配置に戻す',
   uiMenubar63: 'この画面について',
@@ -864,7 +879,7 @@ var STR = {
   uiMenubar70: '環境変数 MARUST_DEV で固定されているので変えられません。',
   uiMenubar71: '切り替えできませんでした。',
   uiMenubar72: 'Google カレンダーと連携',
-  uiMenubar73: 'タイマーで測った時間を、Google カレンダーの予定として自動で残します。',
+  uiMenubar73: 'タイマーで測った時間を、Google カレンダーの予定として自動で残します。クライアント ID / シークレットは「金庫」パネルの「Google カレンダー連携」で設定します（YouTube 用ではありません。YouTube は「サイト」パネルへ）。',
   uiMenubar74: ' タイマーの記録を Google カレンダーに残す',
   uiMenubar75: '連携中',
   uiMenubar76: '記録のみ（カレンダーには送りません）',
@@ -878,13 +893,16 @@ var STR = {
   gcalLinking: 'ブラウザで Google の画面が開きます。許可して、この画面に戻ってください（3 分以内）。',
   gcalLinkDone: 'つながりました。上の「タイマーの記録を Google カレンダーに残す」をオンにすると、記録が始まります。',
   gcalLinkConfirm: 'Google のログイン画面をブラウザで開いて、つなぎ直します。よいですか。',
-  gcalSaveAndLogin: '保存してログインする',
+  gcalSaveAndLogin: 'カレンダー用の鍵を保存してログインする',
+  gcalVaultLink: 'キーは金庫で設定',
+  gcalOpenVault: '金庫で鍵を設定する',
+  gcalNeedVaultKeys: 'まず「金庫」パネルの「Google カレンダー連携」で鍵を入れてください。',
   gcalLogin: 'ログインする',
   gcalLoginUnknown: 'つながっているか読めませんでした。',
-  gcalNoPlugin: 'カレンダーのプラグインが入っていません。',
+  gcalNoPlugin: 'Google カレンダーが未導入です。追加して丸ストを再起動してください。',
   gcalLoginState: function (state) {
     var map = {
-      'none': 'まだつながっていません。下に Google の「クライアント ID」と「クライアントシークレット」を入れて、「保存してログインする」を押してください（作り方は下の説明）。',
+      'none': 'まだつながっていません。鍵（クライアント ID / シークレット）は「金庫」パネルの「Google カレンダー連携」で入れてください（YouTube 用ではありません）。',
       'keys-only': '鍵は入っています。「ログインする」を押すと Google の画面が開きます。',
       'logged-in': 'Google にログイン済みです。つながらなくなったときは「結び直す」を押してください。',
       'expired': 'ログインの期限が切れています。「ログインする」を押してください。'
@@ -929,6 +947,8 @@ var STR = {
   uiPanels1: '<h2>パネル</h2><ul>',
   uiDock1: 'いま見ているタブだけを浮かせる（重ねて、好きな場所へ動かせる）。浮いたウィンドウで押すと元に戻る',
   uiDock2: '浮かせる / 元に戻す',
+  uiDockRefresh1: 'このタブのプラグインを読み直して再表示',
+  uiDockRefresh2: 'プラグインを読み直す',
   uiDock3: 'いま見ているタブだけを別のウィンドウに分ける。分けたウィンドウで押すか、閉じると戻る',
   uiDock4: '別のウィンドウに分ける',
   uiApprovals1: '<p class="empty">承認待ちはありません。</p>',
@@ -1105,6 +1125,12 @@ var STR = {
   },
   uiSecrets10:'結び直しが完了しました。',
   secretsYoutubeHint: '※ YouTube のクライアント ID・シークレットの設定は「サイト別の状態」パネル（ツール → サイト別の状態）から行えます。',
+  secretsGcalTitle: 'Google カレンダー連携',
+  secretsGcalNote: 'Google カレンダー専用のクライアント ID / シークレットです（YouTube・Twitch・Kick 用ではありません）。保存先の金庫名は google.oauth だけです。',
+  secretsGcalClientId: 'カレンダー用クライアント ID',
+  secretsGcalClientSecret: 'カレンダー用クライアントシークレット',
+  secretsGcalSave: 'カレンダーに保存',
+  secretsGcalSaved: 'Google カレンダー用の鍵を保存しました（サイト用ではありません）。',
   secretsNicoSlotHint: '※ ニコ生の自動枠取りはブラウザ拡張でログイン後、OBS開始で枠作成・自動延長・OBS停止1分後に自動終了します。',
   uiSession1: '一時停止',
   uiSession2: '進行中',

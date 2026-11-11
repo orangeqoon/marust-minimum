@@ -77,17 +77,25 @@ async function main() {
   api.registerPluginMethod('sites', 'sites.setOAuthApp', {
     access: 'write', windowOnly: true,
     params: {
-      site: { type: 'string', required: true, max: 16, enum: ['youtube', 'twitch', 'kick', 'google'], error: 'unknown-site' },
+      site: { type: 'string', required: true, max: 16, enum: ['youtube', 'twitch', 'kick'], error: 'unknown-site' },
       clientId: { type: 'string', required: true, max: 2000, typeError: 'bad-client-id', lengthError: 'bad-client-id' },
       clientSecret: { type: 'string', required: true, max: 2000, typeError: 'bad-client-secret', lengthError: 'bad-client-secret' },
       redirectUri: { type: 'string', required: false, max: 200, typeError: 'bad-redirect', lengthError: 'bad-redirect' }
     }
   }, (params) => login.setOAuthApp(params), { audience: 'public' });
+  api.registerPluginMethod('calendar', 'calendar.setOAuthApp', {
+    access: 'write', windowOnly: true,
+    params: {
+      clientId: { type: 'string', required: true, max: 2000, typeError: 'bad-client-id', lengthError: 'bad-client-id' },
+      clientSecret: { type: 'string', required: true, max: 2000, typeError: 'bad-client-secret', lengthError: 'bad-client-secret' },
+      redirectUri: { type: 'string', required: false, max: 200, typeError: 'bad-redirect', lengthError: 'bad-redirect' }
+    }
+  }, (params) => login.setCalendarOAuthApp(params), { audience: 'public' });
   const win = { clientId: WINDOW_ID, kind: 'window', permissions: ['read', 'write'] };
   const browser = { clientId: 'b1', kind: 'browser', permissions: ['read', 'write'] };
 
   // ウィンドウだけ
-  for (const method of ['sites.loginStatus', 'sites.setOAuthApp', 'sites.setConfig']) {
+  for (const method of ['sites.loginStatus', 'sites.setOAuthApp', 'calendar.setOAuthApp', 'sites.setConfig']) {
     assert.strictEqual((await api.call(method, { site: 'youtube', clientId: 'a', clientSecret: 'b', fields: {} }, browser)).error, 'forbidden', method);
   }
 
@@ -101,6 +109,7 @@ async function main() {
 
   // OAuth アプリの鍵
   assert.strictEqual((await api.call('sites.setOAuthApp', { site: 'niconico', clientId: 'a', clientSecret: 'b' }, win)).error, 'unknown-site');
+  assert.strictEqual((await api.call('sites.setOAuthApp', { site: 'google', clientId: 'a', clientSecret: 'b' }, win)).error, 'unknown-site');
   assert.strictEqual((await api.call('sites.setOAuthApp', { site: 'youtube', clientId: '', clientSecret: SECRET }, win)).error, 'bad-client-id');
   assert.strictEqual((await api.call('sites.setOAuthApp', { site: 'youtube', clientId: 'cid', clientSecret: '' }, win)).error, 'bad-client-secret');
   assert.strictEqual((await api.call('sites.setOAuthApp', { site: 'youtube', clientId: 'cid', clientSecret: SECRET, redirectUri: 'https://evil.example/cb' }, win)).error, 'bad-redirect');
@@ -108,6 +117,21 @@ async function main() {
   assert.deepStrictEqual(saved, { ok: true });
   st = await api.call('sites.loginStatus', {}, win);
   assert.strictEqual(st.sites.find((r) => r.id === 'youtube').state, 'keys-only');
+
+  // カレンダー専用 API（google.oauth）。sites.setOAuthApp では書けない
+  const calSaved = await api.call('calendar.setOAuthApp', { clientId: 'gcal-cid', clientSecret: SECRET }, win);
+  assert.deepStrictEqual(calSaved, { ok: true });
+  const gdoc = JSON.parse((await vault.coreReader('test', () => true).get('google.oauth')).value);
+  assert.strictEqual(gdoc.client_id, 'gcal-cid');
+  // 同じ client_id をサイト側へは拒否（値は返さない）
+  const clashSite = await api.call('sites.setOAuthApp', { site: 'youtube', clientId: 'gcal-cid', clientSecret: SECRET }, win);
+  assert.strictEqual(clashSite.ok, false);
+  assert.strictEqual(clashSite.error, 'key-role-mismatch');
+  assert.ok(!JSON.stringify(clashSite).includes('gcal-cid'));
+  // 逆方向も拒否
+  const clashCal = await api.call('calendar.setOAuthApp', { clientId: 'cid', clientSecret: SECRET }, win);
+  assert.strictEqual(clashCal.error, 'key-role-mismatch');
+  assert.ok(!JSON.stringify(clashCal).includes('cid'));
 
   // 既にトークンがあるサイトの鍵を入れ直しても、トークンは残る
   await vault.set('twitch.oauth', JSON.stringify({ client_id: 'old', client_secret: 'old', access_token: TOKEN, refresh_token: 'r', expiry_date: now - 5 }), 'test');

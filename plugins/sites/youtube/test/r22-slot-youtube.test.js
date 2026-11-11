@@ -16,6 +16,7 @@ global.fetch = async function blockedFetch() {
 
 const { createRegistry } = require('../../../../host/layer1/plugin-registry');
 const { createSlotYoutube } = require('../../../../test/_plugins').requirePlugin('slot-youtube');
+const { createOperationCoordinator } = require('../../../../host/layer1/operation-coordinator');
 
 const ROOT = path.join(__dirname, '..', '..', '..', '..');
 const T0 = Date.parse('2026-10-07T12:00:00.000Z');
@@ -41,6 +42,11 @@ function res(status, body) {
   return { status: status, ok: status < 300, async text() { return text; } };
 }
 
+function liveRows(rows) {
+  return rows.map(row => Object.assign({ contentDetails: { boundStreamId: 'S1' }, status: { lifeCycleStatus: 'live' } }, row, { snippet: Object.assign({ title: '題名' }, row.snippet || {}) }));
+}
+const streamRow = () => ({ id: 'S1', contentDetails: { isReusable: true }, cdn: { ingestionType: 'rtmp', ingestionInfo: { ingestionAddress: 'rtmp://a.rtmp.youtube.com/live2', streamName: 'FAKE-INGEST-KEY' } } });
+
 function oauth(over) {
   return JSON.stringify(Object.assign({
     client_id: 'cid', client_secret: CLIENT_SECRET, refresh_token: REFRESH, access_token: ACCESS, expiry_date: T0 + 3600 * 1000
@@ -51,6 +57,7 @@ function oauth(over) {
 function boot(opts) {
   const o = opts || {};
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'r22-slot-yt-'));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ outputDestinationId: 'obs-main', streamId: 'S1' }));
   const clock = { t: o.t0 || T0 };
   const calls = [];
   const logs = [];
@@ -65,16 +72,23 @@ function boot(opts) {
     active: o.active || [],
     transitionFails: o.transitionFails || 0,
     insertCode: o.insertCode || 200,
-    stopOk: o.stopOk !== false
+    stopOk: o.stopOk !== false,
+    made: {}, completed: new Set(), finished: {}, humanStopped: false
   };
   const handler = o.handler || function (c) {
     if (c.host === 'oauth2.googleapis.com') return res(200, { access_token: NEW_ACCESS, expires_in: 3600 });
-    if (c.path === 'liveBroadcasts' && c.method === 'GET' && c.query.broadcastStatus === 'active') return res(200, { items: state.active });
-    if (c.path === 'liveStreams') return res(200, { items: [{ id: 'S1', contentDetails: { isReusable: true } }] });
+    if (c.path === 'liveBroadcasts' && c.method === 'GET' && c.query.broadcastStatus === 'active') return res(200, { items: liveRows(state.active) });
+    if (c.path === 'liveBroadcasts' && c.method === 'GET' && c.query.id) {
+      const current = state.active.find(row => row.id === c.query.id) || state.made[c.query.id] || state.finished[c.query.id];
+      return res(200, { items: current ? liveRows([Object.assign({}, current, { status: { lifeCycleStatus: state.completed.has(c.query.id) ? 'complete' : state.made[c.query.id] && !current.live ? 'ready' : 'live' } })]) : [] });
+    }
+    if (c.path === 'liveStreams') return res(200, { items: [streamRow()] });
     if (c.path === 'liveBroadcasts' && c.method === 'GET') return res(200, { items: [{ snippet: { title: '前の題名', description: '前の説明' } }] });
     if (c.path === 'liveBroadcasts' && c.method === 'POST') {
       if (state.insertCode !== 200) return res(state.insertCode, { error: { errors: [{ reason: state.insertCode === 403 ? 'quotaExceeded' : 'x' }] } });
-      return res(200, { id: 'NEW-' + c.n, snippet: { liveChatId: 'CHAT-' + c.n } });
+      const made = { id: 'NEW-' + c.n, snippet: { liveChatId: 'CHAT-' + c.n } };
+      state.made[made.id] = made;
+      return res(200, made);
     }
     if (c.path === 'liveBroadcasts/bind') return res(200, {});
     if (c.path === 'liveBroadcasts/transition') {
@@ -82,6 +96,8 @@ function boot(opts) {
         state.transitionFails -= 1;
         return res(403, { error: { errors: [{ reason: 'errorStreamInactive' }] } });
       }
+      if (c.query.broadcastStatus === 'complete') { state.completed.add(c.query.id); state.finished[c.query.id] = state.active.find(row => row.id === c.query.id); state.active = state.active.filter(row => row.id !== c.query.id); }
+      if (c.query.broadcastStatus === 'live' && state.made[c.query.id]) { state.made[c.query.id].live = true; state.made[c.query.id].snippet.actualStartTime = new Date(clock.t).toISOString(); }
       return res(200, {});
     }
     if (c.path === 'liveChat/messages') return res(200, {});
@@ -103,6 +119,7 @@ function boot(opts) {
   };
   const ctx = {
     id: 'slot-youtube',
+    operations: createOperationCoordinator().createLease('slot-youtube'),
     dataDir: dir, ...k2(dir),
     mode() { return state.mode; },
     logger(level, message) { logs.push(level + ' ' + message); },
@@ -126,6 +143,26 @@ function boot(opts) {
         if (input.action === 'start') state.obs = Object.assign({}, state.obs, { outputActive: true, outputDuration: 1000 });
         return { ok: true };
       }
+    }
+  };
+  ctx.outputs = {
+    async check({ destinationId }) {
+      obsCalls.push('check');
+      if (!state.stopOk || !ctx.obs) return { ok: false, error: 'obs-control-off' };
+      return { ok: true, proofId: 'FAKE-PROOF', destinationId, kind: 'main', engineId: 'main', targetId: 'main' };
+    },
+    async control({ action }) {
+      if (action === 'status') {
+        const status = ctx.obs && await ctx.obs.getStreamStatus();
+        return status ? { ok: true, streaming: status.outputActive === true, humanStopped: state.humanStopped } : { ok: false };
+      }
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'rollover.json'), 'utf8')).phase, action === 'stop' ? 'stopping' : 'starting', '操作前に意図が永続化される');
+      const result = await ctx.obs.streamControl({ action });
+      if (action === 'start' && result.ok) {
+        for (const made of Object.values(state.made)) { made.live = true; made.snippet.actualStartTime = new Date(clock.t).toISOString(); }
+        if (o.handler && o.handler.onStart) o.handler.onStart(clock.t);
+      }
+      return result;
     }
   };
   if (o.noObs) delete ctx.obs;
@@ -172,7 +209,7 @@ function usageOf(bag) {
       assert.ok(bag.calls.every((c) => c.method === 'GET'));
       assert.deepStrictEqual(bag.obsCalls, ['status'], 'OBS は状態を読むだけ');
       const s = await bag.plugin.actions.getStatus({}, bag.ctx);
-      assert.strictEqual(s.lastOp, 'shadow-would-switch');
+      assert.strictEqual(s.lastOp, 'shadow-would-create');
       assert.strictEqual(s.broadcastId, '');
       assert.strictEqual(bag.events.length, 0);
     } finally { cleanup(bag); }
@@ -259,15 +296,16 @@ function usageOf(bag) {
   });
 
   await test('live: 閾値で 新枠の用意→OBS 停止→旧枠 complete→OBS 再開。切り替えを数える', async () => {
-    const bag = boot({ active: [{ id: 'OLD', snippet: { title: '題名', description: '説明', liveChatId: 'CHAT-OLD' } }], obs: { outputActive: true, outputDuration: 42700 * 1000 } });
+    const bag = boot({ active: [{ id: 'OLD', snippet: { title: '題名', description: '説明', liveChatId: 'CHAT-OLD', actualStartTime: new Date(T0 - 42700 * 1000).toISOString() } }], obs: { outputActive: true, outputDuration: 42700 * 1000 } });
     try {
       await bag.plugin.tick();
-      assert.deepStrictEqual(bag.obsCalls, ['status', 'check', 'status', 'stop', 'start', 'status']);
+      assert.deepStrictEqual(bag.obsCalls, ['status', 'check', 'status', 'status', 'stop', 'status', 'status', 'start', 'status']);
       const order = writes(bag).map((c) => c.path + (c.query.broadcastStatus ? ':' + c.query.broadcastStatus : ''));
-      assert.deepStrictEqual(order, ['liveBroadcasts', 'liveBroadcasts/bind', 'liveChat/messages', 'liveBroadcasts/transition:complete']);
+      assert.deepStrictEqual(order, ['liveBroadcasts', 'liveBroadcasts/bind', 'liveBroadcasts/transition:complete']);
       assert.strictEqual(writes(bag)[0].body.contentDetails.enableAutoStart, true);
       const s = await bag.plugin.actions.getStatus({}, bag.ctx);
       assert.strictEqual(s.lastOp, 'switched');
+      assert.strictEqual(s.rollover.phase, 'done', '旧枠終了と新枠live確認を終えてから確定する');
       assert.ok(/^NEW-/.test(s.broadcastId));
       assert.strictEqual(s.usage.switches, 1);
       assert.strictEqual(s.usage.creates, 1);
@@ -278,7 +316,7 @@ function usageOf(bag) {
   });
 
   await test('live: OBS を止められない（OBS 操作オフ）なら枠を作らない', async () => {
-    const bag = boot({ active: [{ id: 'OLD', snippet: { title: 'T' } }], obs: { outputActive: true, outputDuration: 43000 * 1000 }, stopOk: false });
+    const bag = boot({ active: [{ id: 'OLD', snippet: { title: 'T', actualStartTime: new Date(T0 - 43000 * 1000).toISOString() } }], obs: { outputActive: true, outputDuration: 43000 * 1000 }, stopOk: false });
     bag.ctx.obs.streamControl = async (input) => {
       bag.obsCalls.push(input.action);
       return { ok: false, error: 'obs-control-off' };
@@ -287,7 +325,7 @@ function usageOf(bag) {
       await bag.plugin.tick();
       assert.strictEqual(writes(bag).length, 0);
       const s = await bag.plugin.actions.getStatus({}, bag.ctx);
-      assert.strictEqual(s.error, 'obs-control-off');
+      assert.strictEqual(s.error, 'inspection-failed', '操作権限なしは出力照合失敗として停止する');
       const before = bag.calls.length;
       await bag.plugin.tick();
       assert.strictEqual(bag.calls.length, before, '5 分は再試行しない');
@@ -295,7 +333,7 @@ function usageOf(bag) {
   });
 
   await test('live: 切り替えが 1 日 4 回に達していたら書かない。使用量 7000 でも止める', async () => {
-    const bag = boot({ active: [{ id: 'OLD', snippet: {} }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
+    const bag = boot({ active: [{ id: 'OLD', snippet: { actualStartTime: new Date(T0 - 43000 * 1000).toISOString() } }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
     try {
       fs.writeFileSync(path.join(bag.dir, 'usage.json'), JSON.stringify({ day: '2026-10-07', units: 10, creates: 4, switches: 4, lastCreateAt: 0 }));
       bag.plugin.load(bag.ctx);
@@ -365,7 +403,7 @@ function usageOf(bag) {
       assert.strictEqual(JSON.parse(bag.secretSets[0].value).access_token, NEW_ACCESS);
       const s = JSON.stringify(await bag.plugin.actions.getStatus({}, bag.ctx));
       const everything = s + bag.logs.join('\n') + JSON.stringify(bag.events);
-      for (const secret of [ACCESS, REFRESH, CLIENT_SECRET, NEW_ACCESS]) {
+      for (const secret of [ACCESS, REFRESH, CLIENT_SECRET, NEW_ACCESS, 'FAKE-INGEST-KEY', 'FAKE-PROOF']) {
         assert.strictEqual(everything.indexOf(secret), -1, secret + ' が漏れている');
       }
     } finally { cleanup(bag); }
@@ -410,8 +448,11 @@ function usageOf(bag) {
       assert.strictEqual(out.config.thresholdSec, 42600, '範囲外は既定に戻す');
       assert.strictEqual(out.config.streamId, '');
       assert.strictEqual(out.config.titlePrefix, '夜の配信');
+      assert.strictEqual(out.config.outputDestinationId, 'obs-main', '部分更新でも明示した出力を保持する');
       bag.plugin.load(bag.ctx);
-      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).config.titlePrefix, '夜の配信');
+      const saved = (await bag.plugin.actions.getStatus({}, bag.ctx)).config;
+      assert.strictEqual(saved.titlePrefix, '夜の配信');
+      assert.strictEqual(saved.outputDestinationId, 'obs-main');
     } finally { cleanup(bag); }
   });
 
@@ -443,7 +484,8 @@ function usageOf(bag) {
     const manifest = createRegistry({ appRoot: ROOT, core: { STATE_DIR: os.tmpdir() }, logger() {} }).discover().find((rec) => rec.id === 'slot-youtube').manifest;
     assert.deepStrictEqual(manifest.provides, ['stream.slot@1']);
     assert.deepStrictEqual(manifest.slotFor, ['youtube']);
-    assert.deepStrictEqual(manifest.needs, ['obs.read', 'obs.streamControl', 'destinations', 'events.emit', 'secrets', 'storage']);
+    assert.deepStrictEqual(manifest.needs, ['obs.read', 'obs.streamControl', 'obs.outputControl', 'operations.exclusive', 'destinations', 'events.emit', 'secrets', 'storage']);
+    assert.deepStrictEqual(manifest.api.calls, ['destination.start', 'destination.stop']);
     assert.deepStrictEqual(manifest.secrets, ['youtube.oauth']);
     assert.strictEqual(manifest.defaultMode, 'legacy');
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r22-reg-'));
@@ -464,11 +506,15 @@ function usageOf(bag) {
 
   /** 作る→結ぶ→live を細かく制御できる偽の YouTube。 */
   function scripted(over) {
-    const st = Object.assign({ bindFails: 0, transitionFails: 99, inserts: 0, boundTo: {}, active: [] }, over || {});
+    const st = Object.assign({ bindFails: 0, transitionFails: 99, inserts: 0, boundTo: {}, active: [], completed: new Set(), made: {}, finished: {} }, over || {});
     const handler = function (c) {
       if (c.host === 'oauth2.googleapis.com') return res(200, { access_token: NEW_ACCESS, expires_in: 3600 });
-      if (c.path === 'liveStreams') return res(200, { items: [{ id: 'S1', contentDetails: { isReusable: true } }] });
-      if (c.path === 'liveBroadcasts' && c.method === 'GET' && c.query.broadcastStatus === 'active') return res(200, { items: st.active });
+      if (c.path === 'liveStreams') return res(200, { items: [streamRow()] });
+      if (c.path === 'liveBroadcasts' && c.method === 'GET' && c.query.broadcastStatus === 'active') return res(200, { items: liveRows(st.active) });
+      if (c.path === 'liveBroadcasts' && c.method === 'GET' && c.query.id) {
+        const current = st.active.find(row => row.id === c.query.id) || st.made[c.query.id] || st.finished[c.query.id];
+        return res(200, { items: current ? liveRows([Object.assign({}, current, { status: { lifeCycleStatus: st.completed.has(c.query.id) ? 'complete' : st.made[c.query.id] && !current.live ? 'ready' : 'live' } })]) : [] });
+      }
       if (c.path === 'liveBroadcasts' && c.method === 'GET' && c.query.broadcastStatus === 'upcoming') {
         return res(200, { items: Object.keys(st.boundTo).map((id) => ({ id: id, snippet: { liveChatId: 'CH-' + id }, contentDetails: { boundStreamId: st.boundTo[id] } })) });
       }
@@ -477,7 +523,8 @@ function usageOf(bag) {
         st.inserts += 1;
         const id = 'MADE-' + st.inserts;
         st.boundTo[id] = '';
-        return res(200, { id: id, snippet: { liveChatId: 'CH-' + id } });
+        st.made[id] = { id, snippet: { liveChatId: 'CH-' + id } };
+        return res(200, st.made[id]);
       }
       if (c.path === 'liveBroadcasts/bind') {
         if (st.bindFails > 0) { st.bindFails -= 1; return res(500, ''); }
@@ -491,9 +538,13 @@ function usageOf(bag) {
           st.active.push({ id: c.query.id, snippet: { liveChatId: 'CH-' + c.query.id } });
           return res(200, {});
         }
+        if (c.query.broadcastStatus === 'complete') { st.completed.add(c.query.id); st.finished[c.query.id] = st.active.find(row => row.id === c.query.id); st.active = st.active.filter(row => row.id !== c.query.id); if (st.onComplete) st.onComplete(); }
         return res(200, {});
       }
       return res(200, {});
+    };
+    handler.onStart = now => {
+      for (const row of Object.values(st.made)) { row.live = true; row.snippet.actualStartTime = new Date(now).toISOString(); }
     };
     return { st, handler };
   }
@@ -543,8 +594,8 @@ function usageOf(bag) {
     } finally { cleanup(mine); }
   });
 
-  await test('Must 3: 切り替えの失敗（OBS を止められない）は試行を数え、用意した新枠を 5 分後も使い回す', async () => {
-    const sc = scripted({ active: [{ id: 'OLD', snippet: { title: 'T', liveChatId: 'CH-OLD' } }] });
+  await test('Must 3: 停止失敗の試行を数え、新枠を保持し、5 分後も不確かな停止を再送しない', async () => {
+    const sc = scripted({ active: [{ id: 'OLD', snippet: { title: 'T', liveChatId: 'CH-OLD', actualStartTime: new Date(T0 - 43000 * 1000).toISOString() } }] });
     const bag = boot({ handler: sc.handler, obs: { outputActive: true, outputDuration: 43000 * 1000 } });
     let stopFails = true;
     const baseControl = bag.ctx.obs.streamControl;
@@ -558,24 +609,29 @@ function usageOf(bag) {
       let u = usageOf(bag);
       assert.strictEqual(u.switches, 1, '試行を数える');
       assert.strictEqual(u.creates, 1);
-      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).error, 'obs-stop-failed');
+      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).error, 'stop-failed');
+      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).rollover.phase, 'stopping');
       assert.ok(!bag.calls.some((c) => c.path === 'liveBroadcasts/transition' && c.query.broadcastStatus === 'complete'), '旧枠は閉じない');
       bag.clock.t += 5 * 60 * 1000 + 1000;
       stopFails = false;
       await bag.plugin.tick();
       assert.strictEqual(sc.st.inserts, 1, '用意した新枠を使い回す');
       u = usageOf(bag);
-      assert.strictEqual(u.switches, 2);
+      assert.strictEqual(u.switches, 1, '永続化済みの同一操作は新しい試行として数えない');
       assert.strictEqual(u.creates, 1);
-      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).lastOp, 'switched');
-      assert.deepStrictEqual(bag.events.filter((e) => e.name === 'slot.acquired').map((e) => e.payload.reason), ['reused', 'switched']);
+      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).lastOp, 'stop-uncertain');
+      assert.strictEqual(bag.obsCalls.filter(action => action === 'stop').length, 1, '曖昧な停止要求は自動再送しない');
+      assert.ok(!bag.obsCalls.includes('start'));
+      assert.ok(!bag.calls.some(c => c.query.broadcastStatus === 'complete'));
+      assert.deepStrictEqual(bag.events.filter((e) => e.name === 'slot.acquired').map((e) => e.payload.reason), ['reused']);
     } finally { cleanup(bag); }
   });
 
   await test('Must 4: 再開の前に人が止めていたら OBS を再開しない。画面に出すが致命的な警報（site.trouble）は出さない', async () => {
-    const sc = scripted({ active: [{ id: 'OLD', snippet: { title: 'T' } }] });
+    const sc = scripted({ active: [{ id: 'OLD', snippet: { title: 'T', actualStartTime: new Date(T0 - 43000 * 1000).toISOString() } }] });
     const bag = boot({ handler: sc.handler, obs: { outputActive: true, outputDuration: 43000 * 1000 } });
     const baseControl = bag.ctx.obs.streamControl;
+    sc.st.onComplete = () => { bag.state.humanStopped = true; };
     let starts = 0;
     bag.ctx.obs.streamControl = async (input) => {
       if (input.action === 'start') { starts += 1; return { ok: false, error: 'human-stopped' }; }
@@ -583,17 +639,22 @@ function usageOf(bag) {
     };
     try {
       await bag.plugin.tick();
-      assert.strictEqual(starts, 1, '再試行しない');
+      assert.strictEqual(starts, 0, '出力状態で人の停止を検知したら開始要求を出さない');
       const s = await bag.plugin.actions.getStatus({}, bag.ctx);
-      assert.strictEqual(s.lastOp, 'restart-skipped');
-      assert.strictEqual(s.error, '');
+      assert.strictEqual(s.lastOp, 'human-stopped');
+      assert.strictEqual(s.error, 'human-stopped');
+      assert.strictEqual(s.rollover.phase, 'completing-old');
       assert.strictEqual(bag.events.filter((e) => e.name === 'site.trouble').length, 0);
-      assert.ok(/^MADE-/.test(s.broadcastId), '新枠が今の枠');
+      assert.strictEqual(s.broadcastId, 'OLD', '未確認の新枠を現在枠として採用しない');
+      assert.ok(/^MADE-/.test(s.rollover.newId), '用意した新枠はjournalに保持する');
+      bag.clock.t += 301000;
+      await bag.plugin.tick();
+      assert.strictEqual(starts, 0, '次回も勝手に再開しない');
     } finally { cleanup(bag); }
   });
 
   await test('Should 1: OBS の状態が取れないときは「止まっている」とみなして旧枠を閉じない', async () => {
-    const sc = scripted({ active: [{ id: 'OLD', snippet: { title: 'T' } }] });
+    const sc = scripted({ active: [{ id: 'OLD', snippet: { title: 'T', actualStartTime: new Date(T0 - 43000 * 1000).toISOString() } }] });
     const bag = boot({ handler: sc.handler, obs: { outputActive: true, outputDuration: 43000 * 1000 } });
     let reads = 0;
     bag.ctx.obs.getStreamStatus = async () => {
@@ -604,7 +665,7 @@ function usageOf(bag) {
       await bag.plugin.tick();
       assert.ok(!bag.calls.some((c) => c.path === 'liveBroadcasts/transition' && c.query.broadcastStatus === 'complete'));
       assert.ok(!bag.obsCalls.includes('stop'));
-      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).error, 'obs-stop-failed');
+      assert.strictEqual((await bag.plugin.actions.getStatus({}, bag.ctx)).error, 'inspection-failed');
     } finally { cleanup(bag); }
   });
 
@@ -659,6 +720,36 @@ function usageOf(bag) {
     } finally { cleanup(calm); }
   });
 
+  await test('Stage 5: actualStartTime が無いときは丸スト記録を使い、OBS経過や旧接続観測時刻は使わない', async () => {
+    const recorded = boot({ active: [{ id: 'REC', snippet: {} }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
+    fs.writeFileSync(path.join(recorded.dir, 'timing.json'), JSON.stringify({ broadcastId: 'REC', recordedStartMs: T0 - 43000 * 1000, targetId: '', targetConnectedAt: 0 }));
+    recorded.plugin.load(recorded.ctx);
+    await recorded.plugin.tick();
+    assert.ok(recorded.obsCalls.includes('stop'), '丸スト記録時刻で切り替える');
+    cleanup(recorded);
+
+    const young = boot({ active: [{ id: 'YOUNG', snippet: {} }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
+    await young.plugin.tick();
+    assert.ok(!young.obsCalls.includes('stop'), 'OBS全体の経過時間では切り替えない');
+    cleanup(young);
+
+    const target = boot({ active: [{ id: 'TARGET', snippet: {} }], obs: { outputActive: true, outputDuration: 5000 } });
+    let targetState = 'live';
+    target.ctx.destinations.list = () => ({ ok: true, destinations: [
+      { id: 'obs-main', site: 'twitch', enabled: true, engine: { id: 'main' }, actual: { engineState: 'live' } },
+      { id: 'dest-youtube', site: 'youtube', enabled: true, engine: { id: 'obs-local' }, actual: { engineState: targetState } }
+    ] });
+    await target.plugin.actions.setConfig({ outputDestinationId: 'dest-youtube' }, target.ctx);
+    fs.writeFileSync(path.join(target.dir, 'timing.json'), JSON.stringify({ broadcastId: 'TARGET', recordedStartMs: 0, targetId: 'dest-youtube', targetConnectedAt: T0 - 43000 * 1000 }));
+    target.plugin.load(target.ctx);
+    await target.plugin.tick();
+    assert.ok(target.obsCalls.indexOf('stop') === -1, 'メインOBSは止めない');
+    const unknown = await target.plugin.actions.getStatus({}, target.ctx);
+    assert.strictEqual(unknown.deadlineAtMs, 0, '旧接続観測時刻は実開始時刻として採用しない');
+    assert.strictEqual(unknown.clockError, 'start-time-unknown');
+    cleanup(target);
+  });
+
   await test('Should 4: 配信開始の 3 分後にもう 1 回確かめる（閉じかけの旧枠を見ていた場合）', async () => {
     const bag = boot({ active: [{ id: 'CLOSING', snippet: {} }] });
     try {
@@ -674,7 +765,7 @@ function usageOf(bag) {
     } finally { cleanup(bag); }
   });
 
-  await test('L3d: メイン出力 obs-main が無い・無効・youtube でないなら切り替えない。合図は 1 回だけ。youtube なら今どおり', async () => {
+  await test('L3d: YouTube の有効な配信先が無ければ切り替えない。メインでなくても専用ターゲットなら切り替える', async () => {
     const cases = [
       { noMainRow: true },
       { mainRow: { enabled: false } },
@@ -688,12 +779,11 @@ function usageOf(bag) {
         assert.strictEqual(writes(bag).length, 0);
         assert.ok(!bag.obsCalls.includes('stop'), 'OBS を止めない');
         const s = await bag.plugin.actions.getStatus({}, bag.ctx);
-        assert.strictEqual(s.lastOp, 'main-not-youtube');
+        assert.ok(!['switched', 'youtube-target-not-configured'].includes(s.lastOp), 'YouTube時刻が無いので対象なしでも切り替えない');
         bag.clock.t += 6 * 60 * 1000;
         await bag.plugin.tick();
-        const alerts = bag.events.filter((e) => e.name === 'site.trouble' && e.payload.code === 'main-not-youtube');
-        assert.strictEqual(alerts.length, 1, '同じ状態のあいだ合図は 1 回');
-        assert.strictEqual(alerts[0].payload.site, 'youtube');
+        const alerts = bag.events.filter((e) => e.name === 'site.trouble' && e.payload.code === 'target-not-configured');
+        assert.strictEqual(alerts.length, 0, 'YouTube枠の開始時刻が無い間は切り替え判定を出さない');
       } finally { cleanup(bag); }
     }
     const noApi = boot({ active: [{ id: 'OLD', snippet: {} }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
@@ -703,11 +793,40 @@ function usageOf(bag) {
       assert.strictEqual(writes(noApi).length, 0);
       assert.ok(!noApi.obsCalls.includes('stop'));
     } finally { cleanup(noApi); }
-    const ok = boot({ active: [{ id: 'OLD', snippet: {} }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
+    const ok = boot({ active: [{ id: 'OLD', snippet: { actualStartTime: new Date(T0 - 43000 * 1000).toISOString() } }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
     try {
       await ok.plugin.tick();
       assert.ok(ok.obsCalls.includes('stop'), 'youtube なら切り替える');
     } finally { cleanup(ok); }
+
+    const targetCalls = [];
+    let targetState = 'live';
+    const sub = boot({ active: [{ id: 'OLD', snippet: { actualStartTime: new Date(T0 - 43000 * 1000).toISOString() } }], obs: { outputActive: true, outputDuration: 43000 * 1000 } });
+    await sub.plugin.actions.setConfig({ outputDestinationId: 'dest-youtube' }, sub.ctx);
+    sub.ctx.destinations.list = () => ({ ok: true, destinations: [
+      { id: 'obs-main', site: 'twitch', enabled: true, engine: { id: 'main' }, actual: { engineState: 'live' } },
+      { id: 'dest-youtube', site: 'youtube', enabled: true, engine: { id: 'obs-local' }, actual: { engineState: targetState } }
+    ] });
+    sub.ctx.outputs = {
+      check: async ({ destinationId }) => { assert.strictEqual(destinationId, 'dest-youtube'); return { ok: true, proofId: 'SUB-PROOF', destinationId, kind: 'target', engineId: 'obs-local', targetId: 'YT1' }; },
+      control: async ({ proofId, action }) => {
+        assert.strictEqual(proofId, 'SUB-PROOF');
+        if (action === 'status') return { ok: true, streaming: targetState === 'live', humanStopped: false };
+        targetCalls.push([action, 'dest-youtube']);
+        if (action === 'stop') targetState = 'stopped';
+        if (action === 'start') {
+          targetState = 'live';
+          for (const row of Object.values(sub.state.made)) { row.live = true; row.snippet.actualStartTime = new Date(sub.clock.t).toISOString(); }
+        }
+        return { ok: true };
+      }
+    };
+    try {
+      await sub.plugin.tick();
+      assert.deepStrictEqual(targetCalls, [['stop', 'dest-youtube'], ['start', 'dest-youtube']], 'YouTubeターゲットだけを操作する');
+      assert.deepStrictEqual(sub.obsCalls, ['status'], 'OBSメイン（Twitch）は停止しない');
+      assert.strictEqual((await sub.plugin.actions.getStatus({}, sub.ctx)).lastOp, 'switched');
+    } finally { cleanup(sub); }
   });
 
   if (failed) {

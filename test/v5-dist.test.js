@@ -57,13 +57,13 @@ function readZip(file) {
   });
 }
 
-test('pack:plugins: 内蔵 30 個が 1 つずつ zip になり（直下に manifest.json）、index の SHA-256 と tier が合う', async () => {
+test('pack:plugins: 内蔵 31 個が 1 つずつ zip になり（直下に manifest.json）、index の SHA-256 と tier が合う', async () => {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'v5-pack-'));
   try {
     const index = packAll(out);
-    assert.strictEqual(index.length, 30); // L9a で chat-* 6本が plugins-author へ移り、kukulu-port が plugins へ移った（33 - 6 + 1 = 28）
+    assert.strictEqual(index.length, 31); // サムネイル変更プラグインを追加
     const doc = JSON.parse(fs.readFileSync(path.join(out, 'plugins-index.json'), 'utf8'));
-    assert.strictEqual(doc.plugins.length, 30);
+    assert.strictEqual(doc.plugins.length, 31);
     for (const row of index) {
       const buf = fs.readFileSync(path.join(out, row.file));
       assert.strictEqual(crypto.createHash('sha256').update(buf).digest('hex'), row.sha256, row.id);

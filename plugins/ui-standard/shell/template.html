@@ -7,11 +7,12 @@
     <div class="menu" data-menu="file"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">ファイル</button><div class="menu-pop" role="menu" hidden></div></div>
     <div class="menu" data-menu="edit"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">編集</button><div class="menu-pop" role="menu" hidden></div></div>
     <div class="menu" data-menu="view"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">表示</button><div class="menu-pop" role="menu" hidden></div></div>
-    <div class="menu" data-menu="profile"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">プロファイル</button><div class="menu-pop" role="menu" hidden></div></div>
+    <div class="menu" data-menu="profile"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">配置</button><div class="menu-pop" role="menu" hidden></div></div>
     <div class="menu" data-menu="tools"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">ツール</button><div class="menu-pop" role="menu" hidden></div></div>
     <div class="menu" data-menu="level"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">段階</button><div class="menu-pop" role="menu" hidden></div></div>
     <div class="menu" data-menu="look"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">見た目</button><div class="menu-pop" role="menu" hidden></div></div>
     <div class="menu" data-menu="help"><button class="menu-btn" type="button" aria-haspopup="true" aria-expanded="false">ヘルプ</button><div class="menu-pop" role="menu" hidden></div></div>
+    <button id="reload-everything" class="menu-btn" type="button" title="プラグインと画面を再読み込み">↻ 全体を再読み込み</button>
     <span class="menu-spacer"></span>
     <span id="mode-badge" class="mode-badge" title="モード（開発者用）"></span>
     <p id="connection-status" class="wait" aria-live="polite">丸スト: つながっていません</p>
@@ -52,6 +53,7 @@
     <section class="card" data-panel="plugin-manager">
       <h2>プラグインの管理</h2>
       <p class="timer-hint" id="plugin-manager-hint"></p>
+      <div id="plugin-manager-reload"></div>
       <div id="plugin-manager-install"></div>
       <div id="plugin-manager-make"></div>
       <div id="plugin-manager-list"><p class="empty">読み込み中…</p></div>
@@ -134,6 +136,22 @@
           <strong id="site-login-pair-code" class="pair-code" style="font-size:1.6em;letter-spacing:.15em"></strong>
         </div>
         <div id="site-login-list"></div>
+      </div>
+      <div id="gcal-oauth" hidden>
+        <h3 id="gcal-oauth-title"></h3>
+        <p class="timer-hint" id="gcal-oauth-note"></p>
+        <p class="timer-hint" id="gcal-oauth-state" aria-live="polite"></p>
+        <div class="timer-setup" id="gcal-oauth-form">
+          <label id="gcal-oauth-id-label"> <input id="gcal-oauth-client-id" type="text" maxlength="2000" autocomplete="off" spellcheck="false" /></label>
+          <label id="gcal-oauth-secret-label"> <input id="gcal-oauth-client-secret" type="password" maxlength="2000" autocomplete="new-password" /></label>
+        </div>
+        <div class="timer-actions">
+          <button class="timer-btn primary" type="button" id="gcal-oauth-save" data-need="write"></button>
+          <button class="timer-btn" type="button" id="gcal-oauth-login" data-need="write"></button>
+          <button class="timer-btn" type="button" id="gcal-oauth-rekey" data-need="write"></button>
+        </div>
+        <p class="timer-hint"><a id="gcal-oauth-guide" href="#" target="_blank" rel="noopener noreferrer"></a></p>
+        <p id="gcal-oauth-status" class="timer-hint" aria-live="polite"></p>
       </div>
       <div id="secret-list"><p class="empty">読み込み中…</p></div>
       <div id="secret-admin" hidden>
